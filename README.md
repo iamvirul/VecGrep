@@ -16,6 +16,10 @@ Instead of grepping 50 files and sending 30,000 tokens to Claude, VecGrep return
 
 Incremental re-indexing via SHA256 file hashing skips unchanged files.
 
+## Architecture
+
+![VecGrep architecture diagram](.github/res/diagram.jpeg)
+
 ## Installation
 
 Requires Python 3.12+ and [uv](https://docs.astral.sh/uv/).
