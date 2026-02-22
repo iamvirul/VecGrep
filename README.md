@@ -22,11 +22,13 @@ Incremental re-indexing via SHA256 file hashing skips unchanged files.
 
 ## Installation
 
-Requires Python 3.12+ and [uv](https://docs.astral.sh/uv/).
+Requires Python 3.12 and [uv](https://docs.astral.sh/uv/).
+
+> **Note:** Python 3.12 is required — `tree-sitter-languages` does not yet have wheels for Python 3.13+.
 
 ```bash
-pip install vecgrep        # standard pip
-uv tool install vecgrep   # uv tool (isolated, recommended)
+pip install vecgrep                        # standard pip
+uv tool install --python 3.12 vecgrep     # uv tool (recommended)
 ```
 
 ## Claude Code integration
@@ -34,14 +36,11 @@ uv tool install vecgrep   # uv tool (isolated, recommended)
 Run once — works for every project:
 
 ```bash
-claude mcp add --scope user vecgrep -- uvx --python 3.12 vecgrep
+uv tool install --python 3.12 vecgrep
+claude mcp add --scope user vecgrep -- vecgrep
 ```
 
-This registers VecGrep in your user config (`~/.claude.json`) so it's available globally across all projects without any per-project setup.
-
-> **Note:** `--python 3.12` is required because `tree-sitter-languages` does not yet have wheels for Python 3.13+. VecGrep requires Python 3.12.
-
-`uvx` downloads and runs VecGrep in an isolated environment on first use — no cloning or manual setup required.
+This installs VecGrep as a persistent binary and registers it in your user config (`~/.claude.json`) so it's available globally across all projects. Starts instantly — no download delay on Claude Code launch.
 
 ## Usage with Claude
 
