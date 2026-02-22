@@ -52,6 +52,28 @@ claude mcp add vecgrep -- uvx vecgrep
 
 `uvx` downloads and runs VecGrep in an isolated environment on first use — no cloning or manual setup required.
 
+## Usage with Claude
+
+You don't trigger VecGrep manually - Claude decides when to call the tools based on what you ask.
+
+| What you say to Claude | Tool invoked |
+|---|---|
+| "Index my project at /Users/me/myapp" | `index_codebase` |
+| "How does authentication work in this codebase?" | `search_code` |
+| "Find where database connections are set up" | `search_code` |
+| "How many files are indexed?" | `get_index_status` |
+
+**Typical first-time flow:**
+
+```
+You:    "Search for how payments are handled in /Users/me/myapp"
+Claude: [calls index_codebase automatically since no index exists]
+Claude: [calls search_code with your query]
+Claude: "Here's how payments work — in src/payments.py:42..."
+```
+
+After the first index, subsequent searches skip unchanged files automatically — no re-indexing needed unless your code changes.
+
 ## Tools
 
 ### `index_codebase(path, force=False)`
