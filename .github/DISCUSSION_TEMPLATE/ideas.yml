@@ -1,0 +1,51 @@
+title: "[Idea] "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Have an idea to make VecGrep better? Share it here before opening a PR so we can discuss the approach.
+
+  - type: input
+    id: title
+    attributes:
+      label: Idea summary
+      placeholder: e.g. "Support indexing remote GitHub repos"
+    validations:
+      required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem does this solve?
+      description: Describe the pain point or limitation you're hitting.
+      placeholder: e.g. "I want to search a repo I don't have locally without cloning it first."
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: How would you like this to work? Don't worry about implementation details.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Any other approaches you thought about?
+    validations:
+      required: false
+
+  - type: dropdown
+    id: willing
+    attributes:
+      label: Would you be willing to contribute this?
+      options:
+        - "Yes — I'd like to open a PR"
+        - "Maybe — if someone guides me"
+        - "No — just sharing the idea"
+    validations:
+      required: true

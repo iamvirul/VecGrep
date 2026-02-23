@@ -1,0 +1,39 @@
+title: "[Show & Tell] "
+labels: ["showcase"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Using VecGrep in an interesting way? Share it here — workflows, integrations, benchmarks, anything goes.
+
+  - type: input
+    id: title
+    attributes:
+      label: What are you sharing?
+      placeholder: e.g. "How I use VecGrep + claude-mem to onboard into new codebases"
+    validations:
+      required: true
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Tell us about it
+      description: Describe your setup, workflow, or findings. Screenshots and code snippets welcome.
+    validations:
+      required: true
+
+  - type: input
+    id: project_size
+    attributes:
+      label: Project size (optional)
+      placeholder: e.g. "~1,200 files, 180k lines of Python"
+    validations:
+      required: false
+
+  - type: textarea
+    id: token_savings
+    attributes:
+      label: Token savings or other results (optional)
+      description: Did you measure any improvements? Share the numbers.
+    validations:
+      required: false

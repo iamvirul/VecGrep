@@ -1,0 +1,35 @@
+title: "[Q&A] "
+labels: ["question"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Got a question about VecGrep? Ask away — no question is too simple.
+
+  - type: input
+    id: summary
+    attributes:
+      label: What's your question?
+      placeholder: e.g. "How do I index a monorepo with multiple projects?"
+    validations:
+      required: true
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Context
+      description: Any setup details that might help — OS, Python version, project size, error messages etc.
+      placeholder: |
+        - OS: macOS 14
+        - Python: 3.12
+        - Project size: ~500 files
+    validations:
+      required: false
+
+  - type: textarea
+    id: tried
+    attributes:
+      label: What have you tried?
+      description: Steps or commands you've already attempted.
+    validations:
+      required: false

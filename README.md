@@ -2,6 +2,7 @@
 
 [![CI](https://github.com/iamvirul/VecGrep/actions/workflows/ci.yml/badge.svg)](https://github.com/iamvirul/VecGrep/actions/workflows/ci.yml)
 [![codecov](https://codecov.io/gh/iamvirul/VecGrep/branch/main/graph/badge.svg)](https://codecov.io/gh/iamvirul/VecGrep)
+[![Discussions](https://img.shields.io/github/discussions/iamvirul/VecGrep)](https://github.com/iamvirul/VecGrep/discussions)
 
 Cursor-style semantic code search as an MCP plugin for Claude Code.
 
@@ -117,3 +118,12 @@ All other text files fall back to sliding-window line chunks.
 `~/.vecgrep/<sha256-of-project-path>/index.db`
 
 Each project gets its own isolated index. Delete the directory to wipe the index.
+
+## Community
+
+| | |
+|---|---|
+| ❓ **Questions** | [Start a Q&A discussion](https://github.com/iamvirul/VecGrep/discussions/new?category=q-a) |
+| 💡 **Ideas** | [Share an idea](https://github.com/iamvirul/VecGrep/discussions/new?category=ideas) |
+| 🚀 **Show & Tell** | [Share how you use VecGrep](https://github.com/iamvirul/VecGrep/discussions/new?category=show-and-tell) |
+| 🐛 **Bugs** | [Open an issue](https://github.com/iamvirul/VecGrep/issues/new) |
