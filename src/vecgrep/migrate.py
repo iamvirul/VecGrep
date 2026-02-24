@@ -1,9 +1,7 @@
 
 """Utility script to migrate existing SQLite VecGrep indexes to LanceDB."""
 
-import os
 import sqlite3
-import shutil
 from pathlib import Path
 
 import numpy as np
@@ -18,11 +16,11 @@ def migrate_project(project_dir: Path) -> None:
         return
 
     print(f"Found legacy SQLite index at {db_path}...")
-    
+
     # Read legacy data
     conn = sqlite3.connect(str(db_path))
     conn.row_factory = sqlite3.Row
-    
+
     try:
         rows = conn.execute("SELECT * FROM chunks").fetchall()
         meta_rows = dict(conn.execute("SELECT * FROM meta").fetchall())
@@ -42,15 +40,15 @@ def migrate_project(project_dir: Path) -> None:
 
     prepared_rows = []
     vectors = []
-    
+
     for row in rows:
         d = dict(row)
         # We need to construct a new vector from the BLOB
         vec = np.frombuffer(d["embedding"], dtype=np.float32)
         vectors.append(vec)
-        
+
         # SQLite db doesn't have mtime and size, so we initialize to zeros
-        # This will force the first index run to re-stat everything, 
+        # This will force the first index run to re-stat everything,
         # which is extremely fast anyway and ensures correctness.
         prepared_rows.append({
             "file_path": d["file_path"],
@@ -68,10 +66,10 @@ def migrate_project(project_dir: Path) -> None:
     # Ingest into LanceDB
     with VectorStore(project_dir) as store:
         store.add_chunks(prepared_rows, vectors)
-        
+
         if "last_indexed" in meta_rows:
             store._meta_table.add([{"key": "last_indexed", "value": meta_rows["last_indexed"]}])
-            
+
     # Backup the old SQLite db
     backup_path = db_path.with_suffix(".db.bak")
     db_path.rename(backup_path)
@@ -84,7 +82,7 @@ def main() -> None:
         return
 
     projects = [p for p in VECGREP_HOME.iterdir() if p.is_dir() and len(p.name) == 16]
-    
+
     if not projects:
         print("No VecGrep projects found.")
         return
