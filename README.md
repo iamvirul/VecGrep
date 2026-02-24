@@ -37,7 +37,6 @@ uv tool install --python 3.12 vecgrep     # uv tool (recommended)
 Run once — works for every project:
 
 ```bash
-uv tool install --python 3.12 vecgrep
 claude mcp add --scope user vecgrep -- vecgrep
 ```
 
