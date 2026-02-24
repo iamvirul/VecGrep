@@ -3,14 +3,12 @@
 
 from __future__ import annotations
 
-import os
 from datetime import UTC, datetime
 from pathlib import Path
 
 import lancedb
 import numpy as np
 import pyarrow as pa
-
 
 # Define the LanceDB Schema
 schema = pa.schema([
@@ -34,13 +32,13 @@ class VectorStore:
         # Use LanceDB, removing raw SQLite constraints
         self.db_path = str(self.index_dir / "lancedb")
         self._db = lancedb.connect(self.db_path)
-        
+
         self.table_name = "chunks"
         if self.table_name not in set(self._db.table_names()):
             self._table = self._db.create_table(self.table_name, schema=schema)
         else:
             self._table = self._db.open_table(self.table_name)
-            
+
         # Optional: Meta table for 'last_indexed' etc
         self.meta_table_name = "meta"
         meta_schema = pa.schema([
@@ -67,7 +65,7 @@ class VectorStore:
     # ------------------------------------------------------------------
 
     def get_file_stats(self) -> dict[str, dict]:
-        """Return {file_path: {'file_hash': hash, 'mtime': mtime, 'size': size}} for all indexed files."""
+        """Return {file_path: {'file_hash': hash, 'mtime': mtime, 'size': size}} for all files."""
         if self._table.count_rows() == 0:
             return {}
 
@@ -112,12 +110,12 @@ class VectorStore:
         """
         if len(rows) != len(vectors):
             raise ValueError("rows/vectors length mismatch")
-            
+
         data = []
         for i, r in enumerate(rows):
-            # Create a unique ID for LanceDB (LanceDB requires an implicit or explicit ID, though we manage it via metadata conceptually)
+            # Unique row ID: path + line range + content hash
             row_id = f"{r['file_path']}_{r['start_line']}_{r['end_line']}_{r['chunk_hash']}"
-            
+
             data.append({
                 "id": row_id,
                 "file_path": r["file_path"],
@@ -130,7 +128,7 @@ class VectorStore:
                 "size": r.get("size", 0),
                 "vector": vectors[i].tolist(),
             })
-            
+
         if data:
             self._table.add(data)
 
@@ -186,7 +184,7 @@ class VectorStore:
             .limit(top_k)
             .to_list()
         )
-        
+
         parsed_results = []
         for r in results:
             # _distance is returned by LanceDB. For cosine, smaller distance means more similar.
@@ -199,7 +197,7 @@ class VectorStore:
                 "content": r["content"],
                 "score": float(score),
             })
-            
+
         return parsed_results
 
     # ------------------------------------------------------------------
@@ -220,17 +218,22 @@ class VectorStore:
             total_files = len(pa.compute.unique(arrow["file_path"]))
         else:
             total_files = 0
-            
+
         meta_rows = self._meta_table.search().limit(None).to_list()
         last_indexed = "never"
         for r in meta_rows:
             if r["key"] == "last_indexed":
                 last_indexed = r["value"]
                 break
-                
+
         # Approximate size of the .lance directory
-        db_size = sum(f.stat().st_size for f in Path(self.db_path).glob('**/*') if f.is_file()) if Path(self.db_path).exists() else 0
-        
+        db_path = Path(self.db_path)
+        db_size = (
+            sum(f.stat().st_size for f in db_path.glob("**/*") if f.is_file())
+            if db_path.exists()
+            else 0
+        )
+
         return {
             "total_files": total_files,
             "total_chunks": total_chunks,

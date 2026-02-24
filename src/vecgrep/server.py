@@ -9,8 +9,16 @@ import hashlib
 import logging
 import os
 import threading
-import time
 from pathlib import Path
+
+import numpy as np
+from mcp.server.fastmcp import FastMCP
+from watchdog.events import FileSystemEvent, FileSystemEventHandler
+from watchdog.observers import Observer
+
+from vecgrep.chunker import chunk_file
+from vecgrep.embedder import embed
+from vecgrep.store import VectorStore
 
 _log = logging.getLogger(__name__)
 
@@ -23,15 +31,6 @@ def _stop_all_observers() -> None:
             observer.join(timeout=2)
         except Exception:
             pass
-
-import numpy as np
-from mcp.server.fastmcp import FastMCP
-from watchdog.events import FileSystemEvent, FileSystemEventHandler
-from watchdog.observers import Observer
-
-from vecgrep.chunker import chunk_file
-from vecgrep.embedder import embed
-from vecgrep.store import VectorStore
 
 # ---------------------------------------------------------------------------
 # MCP server setup
@@ -178,12 +177,12 @@ class LiveSyncHandler(FileSystemEventHandler):
         file_path = Path(file_path_str)
         if not file_path.exists() or not file_path.is_file():
             return
-            
+
         try:
             rel = str(file_path.relative_to(self.root_path))
         except ValueError:
             rel = str(file_path)
-            
+
         if _is_ignored_by_gitignore(rel, self.gitignore_patterns) or _should_skip_file(file_path):
             return
 
@@ -191,14 +190,14 @@ class LiveSyncHandler(FileSystemEventHandler):
         lock = _get_index_lock(self.root_path)
         if not lock.acquire(blocking=False):
             return  # Wait for full index to finish or let a future event pick it up
-            
+
         try:
             with _get_store(self.root_path) as store:
-                # Fast track: check if actually changed by stat 
+                # Fast track: check if actually changed by stat
                 # (watchdog can be trigger-happy with save sequences)
                 stats = store.get_file_stats()
                 fp_str = str(file_path)
-                
+
                 try:
                     stat_res = file_path.stat()
                     current_mtime = stat_res.st_mtime
@@ -207,13 +206,17 @@ class LiveSyncHandler(FileSystemEventHandler):
                     return
 
                 existing = stats.get(fp_str)
-                if existing and existing["mtime"] == current_mtime and existing["size"] == current_size:
+                if (
+                    existing
+                    and existing["mtime"] == current_mtime
+                    and existing["size"] == current_size
+                ):
                     return
 
                 # It changed, process it
                 file_hash = _sha256_file(file_path)
                 chunks = chunk_file(fp_str)
-                
+
                 if not chunks:
                     store.delete_file_chunks(fp_str)
                     return
@@ -264,7 +267,7 @@ class LiveSyncHandler(FileSystemEventHandler):
     def on_created(self, event: FileSystemEvent) -> None:
         if not event.is_directory:
             self._schedule_processing(event.src_path)
-            
+
     def on_deleted(self, event: FileSystemEvent) -> None:
         if not event.is_directory:
             root = self.root_path
@@ -279,7 +282,7 @@ class LiveSyncHandler(FileSystemEventHandler):
             timer = threading.Timer(self._debounce_delay, _run_and_cleanup)
             self._debounce_timers[fp] = timer
             timer.start()
-            
+
     def _delete_file(self, root: str, file_path: str) -> None:
         lock = _get_index_lock(root)
         if lock.acquire(blocking=False):
@@ -394,7 +397,11 @@ def _do_index(path: str, force: bool = False, watch: bool = False) -> str:
 
                 if not force:
                     existing = existing_stats.get(fp_str)
-                    if existing and existing["mtime"] == current_mtime and existing["size"] == current_size:
+                    if (
+                        existing
+                        and existing["mtime"] == current_mtime
+                        and existing["size"] == current_size
+                    ):
                         files_skipped += 1
                         continue
 
@@ -405,9 +412,9 @@ def _do_index(path: str, force: bool = False, watch: bool = False) -> str:
                 chunks = chunk_file(fp_str)
                 if not chunks:
                     files_skipped_chunking += 1
-                    # If it existed before but now has no chunks (e.g., deleted all functions), we need to clear it
+                    # If it existed before but now has no chunks, clear it
                     if is_existing:
-                         store.delete_file_chunks(fp_str)
+                        store.delete_file_chunks(fp_str)
                     continue
 
                 rows = [
