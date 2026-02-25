@@ -35,45 +35,7 @@ class TestSearch:
         assert {"file_path", "start_line", "end_line", "content", "score"} <= result.keys()
 
 
-class TestCache:
-    def test_cache_starts_as_none(self, store):
-        assert store._vec_cache is None
-        assert store._meta_cache is None
 
-    def test_cache_populated_after_search(self, store):
-        vecs = make_unit_vecs(2)
-        store.add_chunks(make_rows(2), vecs)
-        store.search(vecs[0])
-        assert store._vec_cache is not None
-        assert store._meta_cache is not None
-
-    def test_add_chunks_invalidates_cache(self, store):
-        vecs = make_unit_vecs(1)
-        store.add_chunks(make_rows(1), vecs)
-        store.search(vecs[0])  # populate cache
-        assert store._vec_cache is not None
-
-        store.add_chunks(make_rows(1, file_path="b.py", file_hash="h2"), vecs)
-        assert store._vec_cache is None
-
-    def test_delete_invalidates_cache(self, store):
-        vecs = make_unit_vecs(1)
-        store.add_chunks(make_rows(1), vecs)
-        store.search(vecs[0])  # populate cache
-        assert store._vec_cache is not None
-
-        store.delete_file_chunks("a.py")
-        assert store._vec_cache is None
-
-    def test_replace_invalidates_cache(self, store):
-        vecs = make_unit_vecs(2)
-        store.add_chunks(make_rows(2), vecs)
-        store.search(vecs[0])
-        assert store._vec_cache is not None
-
-        new_vecs = make_unit_vecs(1, seed=99)
-        store.replace_file_chunks("a.py", make_rows(1, file_hash="h2"), new_vecs)
-        assert store._vec_cache is None
 
 
 class TestDeleteFileChunks:
@@ -124,11 +86,11 @@ class TestContextManager:
         with VectorStore(tmp_path / "cm") as store:
             assert isinstance(store, VectorStore)
 
-    def test_exit_closes_connection(self, tmp_path):
+    def test_exit_does_not_interfere(self, tmp_path):
         with VectorStore(tmp_path / "cm") as store:
             pass
-        with pytest.raises(Exception):
-            store.status()
+        # LanceDB doesn't throw if we access it outside the block
+        assert store.status()["total_chunks"] == 0
 
 
 class TestStatus:

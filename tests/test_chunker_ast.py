@@ -2,9 +2,15 @@
 
 from __future__ import annotations
 
+import sys
 from unittest.mock import MagicMock, patch
 
-from vecgrep.chunker import chunk_file
+# Provide a mock module with a get_parser function to allow imports
+mock_tree_sitter = MagicMock()
+mock_tree_sitter.get_parser = MagicMock()
+sys.modules["tree_sitter_languages"] = mock_tree_sitter
+
+from vecgrep.chunker import chunk_file  # noqa: E402
 
 
 def test_ast_chunks_mocked(tmp_path):
@@ -40,16 +46,20 @@ def test_ast_chunks_mocked(tmp_path):
     parser = MagicMock()
     parser.parse.return_value = tree
 
-    # Mock get_parser
+    # Mock get_parser and HAS_TREE_SITTER
     with patch("tree_sitter_languages.get_parser", return_value=parser) as mock_get_parser:
-        # Create file
-        src = tmp_path / "mocked.py"
-        src.write_text("def foo():\n    pass\n", encoding="utf-8")
+        with patch("vecgrep.chunker.HAS_TREE_SITTER", True, create=True):
+            with patch.dict(
+                "vecgrep.chunker.CHUNK_NODE_TYPES", {"python": ["function_definition"]}
+            ):
+                # Create file
+                src = tmp_path / "mocked.py"
+                src.write_text("def foo():\n    pass\n", encoding="utf-8")
 
-        chunks = chunk_file(str(src))
+                chunks = chunk_file(str(src))
 
-        # Verify get_parser called
-        mock_get_parser.assert_called()
+                # Verify get_parser called
+                mock_get_parser.assert_called()
 
         # Verify chunks
         assert len(chunks) == 1
@@ -80,24 +90,25 @@ def test_ast_chunks_mocked_large_function(tmp_path):
     parser.parse.return_value = tree
 
     with patch("tree_sitter_languages.get_parser", return_value=parser):
-        src = tmp_path / "large.py"
-        # Generate content with 201 lines
-        lines = [f"line {i}" for i in range(201)]
-        content = "\n".join(lines)
-        src.write_text(content, encoding="utf-8")
+        with patch("vecgrep.chunker.HAS_TREE_SITTER", True, create=True):
+                src = tmp_path / "large.py"
+                # Generate content with 201 lines
+                lines = [f"line {i}" for i in range(201)]
+                content = "\n".join(lines)
+                src.write_text(content, encoding="utf-8")
 
-        # We need to ensure content length > MAX_CHUNK_CHARS (1800)
-        # 200 lines * ~7 chars = 1400. Need more.
-        # Let's make lines longer.
-        lines = [f"line {i} " * 10 for i in range(201)]
-        content = "\n".join(lines)
-        src.write_text(content, encoding="utf-8")
+                # We need to ensure content length > MAX_CHUNK_CHARS (1800)
+                # 200 lines * ~7 chars = 1400. Need more.
+                # Let's make lines longer.
+                lines = [f"line {i} " * 10 for i in range(201)]
+                content = "\n".join(lines)
+                src.write_text(content, encoding="utf-8")
 
-        chunks = chunk_file(str(src))
+                chunks = chunk_file(str(src))
 
-        # Should be split
-        assert len(chunks) > 1
-        assert chunks[0].language == "python"
+                # Should be split
+                assert len(chunks) > 1
+                assert chunks[0].language == "python"
 
 def test_ast_chunks_no_matching_nodes_fallback(tmp_path):
     # Mock tree with no interesting nodes
@@ -112,16 +123,17 @@ def test_ast_chunks_no_matching_nodes_fallback(tmp_path):
     parser.parse.return_value = tree
 
     with patch("tree_sitter_languages.get_parser", return_value=parser):
-        src = tmp_path / "fallback.py"
-        src.write_text("print('hello')\n", encoding="utf-8")
+        with patch("vecgrep.chunker.HAS_TREE_SITTER", True, create=True):
+            src = tmp_path / "fallback.py"
+            src.write_text("print('hello')\n", encoding="utf-8")
 
-        chunks = chunk_file(str(src))
+            chunks = chunk_file(str(src))
 
-        # Should fall back to sliding window (1 chunk)
-        assert len(chunks) == 1
-        # Sliding window still sets language to python
-        assert chunks[0].language == "python"
-        assert chunks[0].start_line == 1
+            # Should fall back to sliding window (1 chunk)
+            assert len(chunks) == 1
+            # Sliding window still sets language to python
+            assert chunks[0].language == "python"
+            assert chunks[0].start_line == 1
 
 def test_ast_chunks_empty_target_types(tmp_path):
     # This covers the 'if not target_types' check
@@ -132,13 +144,14 @@ def test_ast_chunks_empty_target_types(tmp_path):
     parser.parse.return_value = MagicMock()
 
     with patch("tree_sitter_languages.get_parser", return_value=parser):
-        with patch.dict("vecgrep.chunker.CHUNK_NODE_TYPES", {"python": []}):
-            src = tmp_path / "empty_types.py"
-            src.write_text("def foo(): pass\n", encoding="utf-8")
+        with patch("vecgrep.chunker.HAS_TREE_SITTER", True, create=True):
+            with patch.dict("vecgrep.chunker.CHUNK_NODE_TYPES", {"python": []}):
+                src = tmp_path / "empty_types.py"
+                src.write_text("def foo(): pass\n", encoding="utf-8")
 
-            chunks = chunk_file(str(src))
+                chunks = chunk_file(str(src))
 
-            # Should fall back to sliding window
-            assert len(chunks) == 1
-            assert chunks[0].language == "python"
+                # Should fall back to sliding window
+                assert len(chunks) == 1
+                assert chunks[0].language == "python"
 

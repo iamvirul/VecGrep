@@ -13,7 +13,6 @@ def store(tmp_path):
     """A fresh VectorStore backed by a temp directory."""
     s = VectorStore(tmp_path / "test_store")
     yield s
-    s.close()
 
 
 def make_unit_vecs(n: int, dim: int = 384, seed: int = 42) -> np.ndarray:
@@ -38,6 +37,8 @@ def make_rows(
             "content": f"content_{i}",
             "file_hash": file_hash,
             "chunk_hash": f"chunkhash_{i}",
+            "mtime": 123456789.0,
+            "size": 1024,
         }
         for i in range(n)
     ]

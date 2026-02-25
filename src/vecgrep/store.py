@@ -1,44 +1,54 @@
-"""SQLite-backed vector store with numpy cosine similarity search."""
+
+"""LanceDB-backed vector store."""
 
 from __future__ import annotations
 
-import sqlite3
 from datetime import UTC, datetime
 from pathlib import Path
 
+import lancedb
 import numpy as np
+import pyarrow as pa
 
-SCHEMA = """
-CREATE TABLE IF NOT EXISTS chunks (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    file_path TEXT NOT NULL,
-    start_line INTEGER NOT NULL,
-    end_line INTEGER NOT NULL,
-    content TEXT NOT NULL,
-    file_hash TEXT NOT NULL,
-    chunk_hash TEXT NOT NULL,
-    embedding BLOB NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_chunks_file ON chunks(file_path);
-CREATE INDEX IF NOT EXISTS idx_chunks_chunk_hash ON chunks(chunk_hash);
-
-CREATE TABLE IF NOT EXISTS meta (
-    key TEXT PRIMARY KEY,
-    value TEXT NOT NULL
-);
-"""
+# Define the LanceDB Schema
+schema = pa.schema([
+    pa.field("id", pa.string()),
+    pa.field("file_path", pa.string()),
+    pa.field("start_line", pa.int32()),
+    pa.field("end_line", pa.int32()),
+    pa.field("content", pa.string()),
+    pa.field("file_hash", pa.string()),
+    pa.field("chunk_hash", pa.string()),
+    pa.field("mtime", pa.float64()),
+    pa.field("size", pa.int64()),
+    pa.field("vector", pa.list_(pa.float32(), 384)),
+])
 
 
 class VectorStore:
     def __init__(self, index_dir: Path) -> None:
         self.index_dir = index_dir
         self.index_dir.mkdir(parents=True, exist_ok=True)
-        self.db_path = index_dir / "index.db"
-        self._conn = sqlite3.connect(str(self.db_path), check_same_thread=False)
-        self._conn.executescript(SCHEMA)
-        self._conn.commit()
-        self._vec_cache: np.ndarray | None = None
-        self._meta_cache: list[dict] | None = None
+        # Use LanceDB, removing raw SQLite constraints
+        self.db_path = str(self.index_dir / "lancedb")
+        self._db = lancedb.connect(self.db_path)
+
+        self.table_name = "chunks"
+        if self.table_name not in set(self._db.table_names()):
+            self._table = self._db.create_table(self.table_name, schema=schema)
+        else:
+            self._table = self._db.open_table(self.table_name)
+
+        # Optional: Meta table for 'last_indexed' etc
+        self.meta_table_name = "meta"
+        meta_schema = pa.schema([
+            pa.field("key", pa.string()),
+            pa.field("value", pa.string())
+        ])
+        if self.meta_table_name not in set(self._db.table_names()):
+            self._meta_table = self._db.create_table(self.meta_table_name, schema=meta_schema)
+        else:
+            self._meta_table = self._db.open_table(self.meta_table_name)
 
     # ------------------------------------------------------------------
     # Context manager
@@ -48,46 +58,36 @@ class VectorStore:
         return self
 
     def __exit__(self, *args: object) -> None:
-        self.close()
+        pass # LanceDB doesn't require explicit closing
 
     # ------------------------------------------------------------------
     # File hash helpers
     # ------------------------------------------------------------------
 
-    def get_file_hashes(self) -> dict[str, str]:
-        """Return {file_path: file_hash} for all indexed files."""
-        rows = self._conn.execute(
-            "SELECT DISTINCT file_path, file_hash FROM chunks"
-        ).fetchall()
-        return {row[0]: row[1] for row in rows}
+    def get_file_stats(self) -> dict[str, dict]:
+        """Return {file_path: {'file_hash': hash, 'mtime': mtime, 'size': size}} for all files."""
+        if self._table.count_rows() == 0:
+            return {}
 
-    # ------------------------------------------------------------------
-    # Cache helpers
-    # ------------------------------------------------------------------
-
-    def _load_cache(self) -> None:
-        """Populate in-memory embedding cache if not already loaded."""
-        if self._vec_cache is not None:
-            return
-        rows = self._conn.execute(
-            "SELECT file_path, start_line, end_line, content, embedding FROM chunks"
-        ).fetchall()
-        if not rows:
-            self._vec_cache = np.empty((0, 384), dtype=np.float32)
-            self._meta_cache = []
-            return
-        self._meta_cache = [
-            {"file_path": r[0], "start_line": r[1], "end_line": r[2], "content": r[3]}
-            for r in rows
-        ]
-        blob = b"".join(r[4] for r in rows)
-        self._vec_cache = (
-            np.frombuffer(blob, dtype=np.float32).reshape(len(rows), -1).copy()
+        rows = (
+            self._table.search()
+            .select(["file_path", "file_hash", "mtime", "size"])
+            .limit(None)
+            .to_list()
         )
+        stats: dict[str, dict] = {}
+        for r in rows:
+            stats[r["file_path"]] = {
+                "file_hash": r["file_hash"],
+                "mtime": r["mtime"],
+                "size": r["size"],
+            }
+        return stats
 
-    def _invalidate_cache(self) -> None:
-        self._vec_cache = None
-        self._meta_cache = None
+    def get_file_hashes(self) -> dict[str, str]:
+        """Compatibility method for legacy callers."""
+        stats = self.get_file_stats()
+        return {fp: s["file_hash"] for fp, s in stats.items()}
 
     # ------------------------------------------------------------------
     # Write helpers
@@ -95,68 +95,75 @@ class VectorStore:
 
     def delete_file_chunks(self, file_path: str) -> None:
         """Remove all chunks for a given file."""
-        self._conn.execute("DELETE FROM chunks WHERE file_path = ?", (file_path,))
-        self._conn.commit()
-        self._invalidate_cache()
+        # Use parameterised-style escaping: double any single quotes in the path
+        # to prevent SQL injection (LanceDB predicate syntax follows SQL quoting rules).
+        safe = file_path.replace("'", "''")
+        self._table.delete(f"file_path = '{safe}'")
 
     def add_chunks(self, rows: list[dict], vectors: np.ndarray) -> None:
         """
         Insert chunk rows with their embeddings.
 
         rows: list of dicts with keys: file_path, start_line, end_line,
-              content, file_hash, chunk_hash
-        vectors: float32 array of shape (len(rows), 384) — pre-normalised
+              content, file_hash, chunk_hash, mtime, size
+        vectors: float32 array of shape (len(rows), 384)
         """
         if len(rows) != len(vectors):
             raise ValueError("rows/vectors length mismatch")
-        params = [
-            (
-                r["file_path"],
-                r["start_line"],
-                r["end_line"],
-                r["content"],
-                r["file_hash"],
-                r["chunk_hash"],
-                vectors[i].tobytes(),
-            )
-            for i, r in enumerate(rows)
-        ]
-        self._conn.executemany(
-            "INSERT INTO chunks "
-            "(file_path, start_line, end_line, content, file_hash, chunk_hash, embedding) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            params,
-        )
-        self._conn.commit()
-        self._invalidate_cache()
+
+        data = []
+        for i, r in enumerate(rows):
+            # Unique row ID: path + line range + content hash
+            row_id = f"{r['file_path']}_{r['start_line']}_{r['end_line']}_{r['chunk_hash']}"
+
+            data.append({
+                "id": row_id,
+                "file_path": r["file_path"],
+                "start_line": r["start_line"],
+                "end_line": r["end_line"],
+                "content": r["content"],
+                "file_hash": r["file_hash"],
+                "chunk_hash": r["chunk_hash"],
+                "mtime": r.get("mtime", 0.0),
+                "size": r.get("size", 0),
+                "vector": vectors[i].tolist(),
+            })
+
+        if data:
+            self._table.add(data)
 
     def replace_file_chunks(
         self, file_path: str, rows: list[dict], vectors: np.ndarray
     ) -> None:
-        """Atomically delete existing chunks and insert new ones for a file."""
+        """Replace chunks for a file: add new rows first, then delete old ones by ID.
+
+        Adding before deleting means a crash leaves duplicates rather than gaps.
+        Duplicates are harmless and cleaned up on the next index run, whereas
+        gaps (from delete-then-add crashes) would cause files to disappear from search.
+        """
         if len(rows) != len(vectors):
             raise ValueError("rows/vectors length mismatch")
-        params = [
-            (
-                r["file_path"],
-                r["start_line"],
-                r["end_line"],
-                r["content"],
-                r["file_hash"],
-                r["chunk_hash"],
-                vectors[i].tobytes(),
-            )
-            for i, r in enumerate(rows)
-        ]
-        with self._conn:
-            self._conn.execute("DELETE FROM chunks WHERE file_path = ?", (file_path,))
-            self._conn.executemany(
-                "INSERT INTO chunks "
-                "(file_path, start_line, end_line, content, file_hash, chunk_hash, embedding) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                params,
-            )
-        self._invalidate_cache()
+
+        # Snapshot existing IDs before we add anything
+        safe = file_path.replace("'", "''")
+        existing_rows = (
+            self._table.search()
+            .where(f"file_path = '{safe}'")
+            .select(["id"])
+            .limit(None)
+            .to_list()
+        ) if self._table.count_rows() > 0 else []
+        old_ids = [r["id"] for r in existing_rows]
+
+        # Add new chunks first — crash here leaves both old and new (duplicates, not gaps)
+        if rows:
+            self.add_chunks(rows, vectors)
+
+        # Now remove only the old rows by their IDs
+        if old_ids:
+            # LanceDB delete predicate: id IN ('a', 'b', ...)
+            escaped = ", ".join(f"'{i.replace(chr(39), chr(39)+chr(39))}'" for i in old_ids)
+            self._table.delete(f"id IN ({escaped})")
 
     # ------------------------------------------------------------------
     # Search
@@ -164,57 +171,79 @@ class VectorStore:
 
     def search(self, query_vec: np.ndarray, top_k: int = 8) -> list[dict]:
         """
-        Cosine similarity search. query_vec must be pre-normalised (shape 384,).
+        Cosine similarity search via LanceDB natively.
         Returns list of dicts: {file_path, start_line, end_line, content, score}.
         """
-        self._load_cache()
-        assert self._vec_cache is not None
-        assert self._meta_cache is not None
-
-        if len(self._vec_cache) == 0:
+        if self._table.count_rows() == 0:
             return []
 
-        scores = self._vec_cache @ query_vec
-        top_indices = np.argsort(scores)[::-1][:top_k]
+        # LanceDB uses L2 or Cosine. We explicitly set metric="cosine"
+        results = (
+            self._table.search(query_vec.tolist())
+            .metric("cosine")
+            .limit(top_k)
+            .to_list()
+        )
 
-        return [
-            {
-                "file_path": self._meta_cache[i]["file_path"],
-                "start_line": self._meta_cache[i]["start_line"],
-                "end_line": self._meta_cache[i]["end_line"],
-                "content": self._meta_cache[i]["content"],
-                "score": float(scores[i]),
-            }
-            for i in top_indices
-        ]
+        parsed_results = []
+        for r in results:
+            # _distance is returned by LanceDB. For cosine, smaller distance means more similar.
+            # Convert to a similarity score to maintain compatibility: score = 1 - distance
+            score = 1.0 - r.get("_distance", 0.0)
+            parsed_results.append({
+                "file_path": r["file_path"],
+                "start_line": r["start_line"],
+                "end_line": r["end_line"],
+                "content": r["content"],
+                "score": float(score),
+            })
+
+        return parsed_results
 
     # ------------------------------------------------------------------
     # Status
     # ------------------------------------------------------------------
 
     def status(self) -> dict:
-        total_chunks = self._conn.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
-        total_files = self._conn.execute(
-            "SELECT COUNT(DISTINCT file_path) FROM chunks"
-        ).fetchone()[0]
-        last_indexed = self._conn.execute(
-            "SELECT value FROM meta WHERE key = 'last_indexed'"
-        ).fetchone()
-        db_size = self.db_path.stat().st_size if self.db_path.exists() else 0
+        total_chunks = self._table.count_rows()
+
+        if total_chunks > 0:
+            # Project only file_path to avoid loading vectors (~75 MB on large indexes)
+            arrow = (
+                self._table.search()
+                .select(["file_path"])
+                .limit(None)
+                .to_arrow()
+            )
+            total_files = len(pa.compute.unique(arrow["file_path"]))
+        else:
+            total_files = 0
+
+        meta_rows = self._meta_table.search().limit(None).to_list()
+        last_indexed = "never"
+        for r in meta_rows:
+            if r["key"] == "last_indexed":
+                last_indexed = r["value"]
+                break
+
+        # Approximate size of the .lance directory
+        db_path = Path(self.db_path)
+        db_size = (
+            sum(f.stat().st_size for f in db_path.glob("**/*") if f.is_file())
+            if db_path.exists()
+            else 0
+        )
+
         return {
             "total_files": total_files,
             "total_chunks": total_chunks,
-            "last_indexed": last_indexed[0] if last_indexed else "never",
+            "last_indexed": last_indexed,
             "index_size_bytes": db_size,
         }
 
     def touch_last_indexed(self) -> None:
         ts = datetime.now(UTC).isoformat()
-        self._conn.execute(
-            "INSERT OR REPLACE INTO meta (key, value) VALUES ('last_indexed', ?)",
-            (ts,),
-        )
-        self._conn.commit()
-
-    def close(self) -> None:
-        self._conn.close()
+        # Delete old key if exists
+        self._meta_table.delete("key = 'last_indexed'")
+        # Add new key
+        self._meta_table.add([{"key": "last_indexed", "value": ts}])

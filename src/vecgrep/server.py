@@ -1,19 +1,36 @@
+
 """FastMCP server exposing VecGrep tools."""
 
 from __future__ import annotations
 
+import atexit
 import fnmatch
 import hashlib
+import logging
 import os
 import threading
 from pathlib import Path
 
 import numpy as np
 from mcp.server.fastmcp import FastMCP
+from watchdog.events import FileSystemEvent, FileSystemEventHandler
+from watchdog.observers import Observer
 
 from vecgrep.chunker import chunk_file
 from vecgrep.embedder import embed
 from vecgrep.store import VectorStore
+
+_log = logging.getLogger(__name__)
+
+
+def _stop_all_observers() -> None:
+    """Stop all background watchdog threads on process exit."""
+    for observer in list(_OBSERVER_REGISTRY.values()):
+        try:
+            observer.stop()
+            observer.join(timeout=2)
+        except Exception:
+            pass
 
 # ---------------------------------------------------------------------------
 # MCP server setup
@@ -141,6 +158,151 @@ def _load_gitignore(root: Path) -> list[str]:
     return patterns
 
 
+# ---------------------------------------------------------------------------
+# Background File Watcher
+# ---------------------------------------------------------------------------
+
+_OBSERVER_REGISTRY: dict[str, Observer] = {}
+atexit.register(_stop_all_observers)
+
+
+class LiveSyncHandler(FileSystemEventHandler):
+    def __init__(self, root_path: str, gitignore_patterns: list[str]):
+        self.root_path = root_path
+        self.gitignore_patterns = gitignore_patterns
+        self._debounce_timers: dict[str, threading.Timer] = {}
+        self._debounce_delay = 2.0  # seconds
+
+    def _process_file(self, file_path_str: str) -> None:
+        file_path = Path(file_path_str)
+        if not file_path.exists() or not file_path.is_file():
+            return
+
+        try:
+            rel = str(file_path.relative_to(self.root_path))
+        except ValueError:
+            rel = str(file_path)
+
+        if _is_ignored_by_gitignore(rel, self.gitignore_patterns) or _should_skip_file(file_path):
+            return
+
+        # Perform targeted index for this single file
+        lock = _get_index_lock(self.root_path)
+        if not lock.acquire(blocking=False):
+            return  # Wait for full index to finish or let a future event pick it up
+
+        try:
+            with _get_store(self.root_path) as store:
+                # Fast track: check if actually changed by stat
+                # (watchdog can be trigger-happy with save sequences)
+                stats = store.get_file_stats()
+                fp_str = str(file_path)
+
+                try:
+                    stat_res = file_path.stat()
+                    current_mtime = stat_res.st_mtime
+                    current_size = stat_res.st_size
+                except OSError:
+                    return
+
+                existing = stats.get(fp_str)
+                if (
+                    existing
+                    and existing["mtime"] == current_mtime
+                    and existing["size"] == current_size
+                ):
+                    return
+
+                # It changed, process it
+                file_hash = _sha256_file(file_path)
+                chunks = chunk_file(fp_str)
+
+                if not chunks:
+                    store.delete_file_chunks(fp_str)
+                    return
+
+                rows = [
+                    {
+                        "file_path": fp_str,
+                        "start_line": c.start_line,
+                        "end_line": c.end_line,
+                        "content": c.content,
+                        "file_hash": file_hash,
+                        "chunk_hash": _sha256_str(c.content),
+                        "mtime": current_mtime,
+                        "size": current_size,
+                    }
+                    for c in chunks
+                ]
+                texts = [c.content for c in chunks]
+
+                batch_vecs: list[np.ndarray] = []
+                for i in range(0, len(texts), EMBED_BATCH):
+                    batch_vecs.append(embed(texts[i : i + EMBED_BATCH]))
+                vecs = np.concatenate(batch_vecs)
+
+                store.replace_file_chunks(fp_str, rows, vecs)
+                store.touch_last_indexed()
+        except Exception:
+            _log.exception("LiveSync error processing %s", file_path_str)
+        finally:
+            lock.release()
+
+    def _schedule_processing(self, file_path: str) -> None:
+        if file_path in self._debounce_timers:
+            self._debounce_timers[file_path].cancel()
+
+        def _run_and_cleanup() -> None:
+            self._process_file(file_path)
+            self._debounce_timers.pop(file_path, None)
+
+        timer = threading.Timer(self._debounce_delay, _run_and_cleanup)
+        self._debounce_timers[file_path] = timer
+        timer.start()
+
+    def on_modified(self, event: FileSystemEvent) -> None:
+        if not event.is_directory:
+            self._schedule_processing(event.src_path)
+
+    def on_created(self, event: FileSystemEvent) -> None:
+        if not event.is_directory:
+            self._schedule_processing(event.src_path)
+
+    def on_deleted(self, event: FileSystemEvent) -> None:
+        if not event.is_directory:
+            root = self.root_path
+            fp = event.src_path
+            if fp in self._debounce_timers:
+                self._debounce_timers[fp].cancel()
+
+            def _run_and_cleanup() -> None:
+                self._delete_file(root, fp)
+                self._debounce_timers.pop(fp, None)
+
+            timer = threading.Timer(self._debounce_delay, _run_and_cleanup)
+            self._debounce_timers[fp] = timer
+            timer.start()
+
+    def _delete_file(self, root: str, file_path: str) -> None:
+        lock = _get_index_lock(root)
+        if lock.acquire(blocking=False):
+            try:
+                with _get_store(root) as store:
+                    store.delete_file_chunks(file_path)
+            finally:
+                lock.release()
+
+def _ensure_watcher(root: Path, gitignore: list[str]) -> None:
+    root_str = str(root)
+    with _LOCK_REGISTRY_LOCK:
+        if root_str not in _OBSERVER_REGISTRY:
+            observer = Observer()
+            handler = LiveSyncHandler(root_str, gitignore)
+            observer.schedule(handler, root_str, recursive=True)
+            observer.start()
+            _OBSERVER_REGISTRY[root_str] = observer
+
+
 def _is_ignored_by_gitignore(rel_path: str, patterns: list[str]) -> bool:
     parts = Path(rel_path).parts
     for pattern in patterns:
@@ -195,7 +357,7 @@ def _walk_files(root: Path, gitignore_patterns: list[str]) -> list[Path]:
     return files
 
 
-def _do_index(path: str, force: bool = False) -> str:
+def _do_index(path: str, force: bool = False, watch: bool = False) -> str:
     root = Path(path).resolve()
     if not root.exists():
         return f"Error: path does not exist: {path}"
@@ -209,11 +371,11 @@ def _do_index(path: str, force: bool = False) -> str:
         all_files = _walk_files(root, gitignore)
 
         with _get_store(str(root)) as store:
-            existing_hashes = {} if force else store.get_file_hashes()
+            existing_stats = {} if force else store.get_file_stats()
 
             # Orphan cleanup: remove chunks for files no longer on disk
             all_file_strs = {str(fp) for fp in all_files}
-            orphan_paths = set(existing_hashes) - all_file_strs
+            orphan_paths = set(existing_stats) - all_file_strs
             for p in orphan_paths:
                 store.delete_file_chunks(p)
 
@@ -223,18 +385,36 @@ def _do_index(path: str, force: bool = False) -> str:
             total_new_chunks = 0
 
             for fp in all_files:
-                file_hash = _sha256_file(fp)
                 fp_str = str(fp)
 
-                if not force and existing_hashes.get(fp_str) == file_hash:
+                try:
+                    stat_res = fp.stat()
+                    current_mtime = stat_res.st_mtime
+                    current_size = stat_res.st_size
+                except OSError:
                     files_skipped += 1
                     continue
 
-                is_existing = fp_str in existing_hashes
+                if not force:
+                    existing = existing_stats.get(fp_str)
+                    if (
+                        existing
+                        and existing["mtime"] == current_mtime
+                        and existing["size"] == current_size
+                    ):
+                        files_skipped += 1
+                        continue
+
+                # File changed or is new, calculate hash for metadata
+                file_hash = _sha256_file(fp)
+                is_existing = fp_str in existing_stats
 
                 chunks = chunk_file(fp_str)
                 if not chunks:
                     files_skipped_chunking += 1
+                    # If it existed before but now has no chunks, clear it
+                    if is_existing:
+                        store.delete_file_chunks(fp_str)
                     continue
 
                 rows = [
@@ -245,6 +425,8 @@ def _do_index(path: str, force: bool = False) -> str:
                         "content": c.content,
                         "file_hash": file_hash,
                         "chunk_hash": _sha256_str(c.content),
+                        "mtime": current_mtime,
+                        "size": current_size,
                     }
                     for c in chunks
                 ]
@@ -265,6 +447,10 @@ def _do_index(path: str, force: bool = False) -> str:
 
             store.touch_last_indexed()
 
+        # Only start the background watcher when explicitly requested
+        if watch:
+            _ensure_watcher(root, gitignore)
+
         return (
             f"Indexed {files_changed} file(s), {total_new_chunks} chunk(s) added, "
             f"{len(orphan_paths)} orphan(s) removed "
@@ -280,7 +466,7 @@ def _do_index(path: str, force: bool = False) -> str:
 
 
 @mcp.tool()
-def index_codebase(path: str, force: bool = False) -> str:
+def index_codebase(path: str, force: bool = False, watch: bool = False) -> str:
     """
     Index a codebase directory for semantic search.
 
@@ -291,12 +477,13 @@ def index_codebase(path: str, force: bool = False) -> str:
     Args:
         path: Absolute path to the codebase root directory.
         force: If True, re-index all files even if unchanged.
+        watch: If True, start a background watcher for live sync on file changes.
 
     Returns:
         Summary: files indexed, chunks added, files skipped.
     """
     try:
-        return _do_index(path, force=force)
+        return _do_index(path, force=force, watch=watch)
     except Exception as e:
         return f"Error: {e}"
 
