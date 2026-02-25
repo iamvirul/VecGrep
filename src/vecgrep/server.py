@@ -576,13 +576,20 @@ def get_index_status(path: str) -> str:
         with _get_store(str(root)) as store:
             s = store.status()
 
+        from vecgrep.embedder import _detect_device
+
         size_mb = s["index_size_bytes"] / (1024 * 1024)
+        device = _detect_device()
+        device_label = {"cuda": "CUDA (GPU)", "mps": "Metal (Apple Silicon)", "cpu": "CPU"}.get(
+            device, device
+        )
         return (
             f"Index status for: {root}\n"
             f"  Files indexed:  {s['total_files']}\n"
             f"  Total chunks:   {s['total_chunks']}\n"
             f"  Last indexed:   {s['last_indexed']}\n"
-            f"  Index size:     {size_mb:.1f} MB"
+            f"  Index size:     {size_mb:.1f} MB\n"
+            f"  Compute device: {device_label}"
         )
     except Exception as e:
         return f"Error: {e}"
