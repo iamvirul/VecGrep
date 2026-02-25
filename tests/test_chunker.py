@@ -89,3 +89,14 @@ class TestRustFile:
         assert len(chunks) >= 1
         combined = " ".join(c.content for c in chunks)
         assert "fn" in combined or "struct" in combined
+
+
+class TestNoTreeSitter:
+    def test_falls_back_to_sliding_window_when_tree_sitter_unavailable(self, tmp_path):
+        from unittest.mock import patch
+        src = tmp_path / "mod.py"
+        src.write_text("def foo():\n    return 1\n", encoding="utf-8")
+        with patch("vecgrep.chunker.HAS_TREE_SITTER", False):
+            chunks = chunk_file(str(src))
+        assert len(chunks) >= 1
+        assert chunks[0].start_line == 1

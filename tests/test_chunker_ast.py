@@ -47,7 +47,7 @@ def test_ast_chunks_mocked(tmp_path):
     parser.parse.return_value = tree
 
     # Mock get_parser and HAS_TREE_SITTER
-    with patch("tree_sitter_languages.get_parser", return_value=parser) as mock_get_parser:
+    with patch("vecgrep.chunker.get_parser", return_value=parser) as mock_get_parser:
         with patch("vecgrep.chunker.HAS_TREE_SITTER", True, create=True):
             with patch.dict(
                 "vecgrep.chunker.CHUNK_NODE_TYPES", {"python": ["function_definition"]}
@@ -89,7 +89,7 @@ def test_ast_chunks_mocked_large_function(tmp_path):
     parser = MagicMock()
     parser.parse.return_value = tree
 
-    with patch("tree_sitter_languages.get_parser", return_value=parser):
+    with patch("vecgrep.chunker.get_parser", return_value=parser):
         with patch("vecgrep.chunker.HAS_TREE_SITTER", True, create=True):
                 src = tmp_path / "large.py"
                 # Generate content with 201 lines
@@ -122,7 +122,7 @@ def test_ast_chunks_no_matching_nodes_fallback(tmp_path):
     parser = MagicMock()
     parser.parse.return_value = tree
 
-    with patch("tree_sitter_languages.get_parser", return_value=parser):
+    with patch("vecgrep.chunker.get_parser", return_value=parser):
         with patch("vecgrep.chunker.HAS_TREE_SITTER", True, create=True):
             src = tmp_path / "fallback.py"
             src.write_text("print('hello')\n", encoding="utf-8")
@@ -143,7 +143,7 @@ def test_ast_chunks_empty_target_types(tmp_path):
     parser = MagicMock()
     parser.parse.return_value = MagicMock()
 
-    with patch("tree_sitter_languages.get_parser", return_value=parser):
+    with patch("vecgrep.chunker.get_parser", return_value=parser):
         with patch("vecgrep.chunker.HAS_TREE_SITTER", True, create=True):
             with patch.dict("vecgrep.chunker.CHUNK_NODE_TYPES", {"python": []}):
                 src = tmp_path / "empty_types.py"

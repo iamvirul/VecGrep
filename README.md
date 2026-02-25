@@ -11,11 +11,11 @@ Instead of grepping 50 files and sending 30,000 tokens to Claude, VecGrep return
 ## How it works
 
 1. **Chunk** — Parses source files with tree-sitter to extract semantic units (functions, classes, methods)
-2. **Embed** — Encodes each chunk locally using `all-MiniLM-L6-v2` (384-dim, ~80MB one-time download)
-3. **Store** — Saves embeddings + metadata in SQLite under `~/.vecgrep/<project_hash>/`
-4. **Search** — Cosine similarity over all embeddings returns the most relevant snippets
+2. **Embed** — Encodes each chunk locally using [`all-MiniLM-L6-v2-code-search-512`](https://huggingface.co/isuruwijesiri/all-MiniLM-L6-v2-code-search-512) (384-dim, ~80MB one-time download), automatically using Metal (Apple Silicon), CUDA (NVIDIA), or CPU
+3. **Store** — Saves embeddings + metadata in LanceDB under `~/.vecgrep/<project_hash>/`
+4. **Search** — ANN index (IVF-PQ) for fast approximate search on large codebases
 
-Incremental re-indexing via SHA256 file hashing skips unchanged files.
+Incremental re-indexing via mtime/size checks skips unchanged files.
 
 ## Architecture
 
@@ -117,6 +117,20 @@ All other text files fall back to sliding-window line chunks.
 `~/.vecgrep/<sha256-of-project-path>/index.db`
 
 Each project gets its own isolated index. Delete the directory to wipe the index.
+
+## Acknowledgements
+
+The embedding model used by VecGrep is [`all-MiniLM-L6-v2-code-search-512`](https://huggingface.co/isuruwijesiri/all-MiniLM-L6-v2-code-search-512), a model fine-tuned specifically for semantic code search by [@isuruwijesiri](https://huggingface.co/isuruwijesiri).
+
+```bibtex
+@misc{all_MiniLM_L6_v2_code_search_512,
+  author    = {isuruwijesiri},
+  title     = {all-MiniLM-L6-v2-code-search-512},
+  year      = {2026},
+  publisher = {Hugging Face},
+  url       = {https://huggingface.co/isuruwijesiri/all-MiniLM-L6-v2-code-search-512}
+}
+```
 
 ## Community
 

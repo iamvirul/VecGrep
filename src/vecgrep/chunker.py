@@ -5,6 +5,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
+try:
+    from tree_sitter_languages import get_parser  # type: ignore
+
+    HAS_TREE_SITTER = True
+except ImportError:
+    HAS_TREE_SITTER = False
+
 MAX_CHUNK_CHARS = 1800  # ~512 tokens
 SLIDING_WINDOW_LINES = 50
 SLIDING_WINDOW_OVERLAP = 25
@@ -183,9 +190,9 @@ def _sliding_window_chunks(source: str, file_path: str, language: str) -> list[C
 
 def _ast_chunks(source: str, file_path: str, language: str) -> list[Chunk]:
     """Extract semantic chunks from AST nodes."""
+    if not HAS_TREE_SITTER:
+        return _sliding_window_chunks(source, file_path, language)
     try:
-        from tree_sitter_languages import get_parser  # type: ignore
-
         parser = get_parser(language)
     except Exception:
         return _sliding_window_chunks(source, file_path, language)

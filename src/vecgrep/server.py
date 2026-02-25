@@ -17,7 +17,7 @@ from watchdog.events import FileSystemEvent, FileSystemEventHandler
 from watchdog.observers import Observer
 
 from vecgrep.chunker import chunk_file
-from vecgrep.embedder import embed
+from vecgrep.embedder import _detect_device, embed
 from vecgrep.store import VectorStore
 
 _log = logging.getLogger(__name__)
@@ -447,6 +447,10 @@ def _do_index(path: str, force: bool = False, watch: bool = False) -> str:
 
             store.touch_last_indexed()
 
+            # Build ANN index when files changed (enables sub-linear search on large repos)
+            if files_changed > 0:
+                store.build_index()
+
         # Only start the background watcher when explicitly requested
         if watch:
             _ensure_watcher(root, gitignore)
@@ -573,12 +577,17 @@ def get_index_status(path: str) -> str:
             s = store.status()
 
         size_mb = s["index_size_bytes"] / (1024 * 1024)
+        device = _detect_device()
+        device_label = {"cuda": "CUDA (GPU)", "mps": "Metal (Apple Silicon)", "cpu": "CPU"}.get(
+            device, device
+        )
         return (
             f"Index status for: {root}\n"
             f"  Files indexed:  {s['total_files']}\n"
             f"  Total chunks:   {s['total_chunks']}\n"
             f"  Last indexed:   {s['last_indexed']}\n"
-            f"  Index size:     {size_mb:.1f} MB"
+            f"  Index size:     {size_mb:.1f} MB\n"
+            f"  Compute device: {device_label}"
         )
     except Exception as e:
         return f"Error: {e}"

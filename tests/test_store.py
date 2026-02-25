@@ -131,3 +131,30 @@ class TestGetFileHashes:
         store.add_chunks(rows_b, vecs[1:])
         hashes = store.get_file_hashes()
         assert hashes == {"a.py": "hash_a", "b.py": "hash_b"}
+
+
+class TestAddChunksValidation:
+    def test_length_mismatch_raises(self, store):
+        vecs = make_unit_vecs(3)
+        rows = make_rows(2)
+        with pytest.raises(ValueError, match="mismatch"):
+            store.add_chunks(rows, vecs)
+
+
+class TestBuildIndex:
+    def test_returns_false_when_too_few_chunks(self, store):
+        vecs = make_unit_vecs(5)
+        store.add_chunks(make_rows(5), vecs)
+        assert store.build_index() is False
+
+    def test_returns_true_and_builds_when_enough_chunks(self, tmp_path):
+        from unittest.mock import MagicMock, patch
+        s = VectorStore(tmp_path / "idx")
+        vecs = make_unit_vecs(5)
+        s.add_chunks(make_rows(5), vecs)
+        mock_create = MagicMock()
+        with patch.object(s._table, "create_index", mock_create), \
+             patch.object(s._table, "count_rows", return_value=300):
+            result = s.build_index()
+        assert result is True
+        mock_create.assert_called_once()
