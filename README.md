@@ -1,8 +1,8 @@
 # VecGrep
 
-[![CI](https://github.com/iamvirul/VecGrep/actions/workflows/ci.yml/badge.svg)](https://github.com/iamvirul/VecGrep/actions/workflows/ci.yml)
-[![codecov](https://codecov.io/gh/iamvirul/VecGrep/branch/main/graph/badge.svg)](https://codecov.io/gh/iamvirul/VecGrep)
-[![Discussions](https://img.shields.io/github/discussions/iamvirul/VecGrep)](https://github.com/iamvirul/VecGrep/discussions)
+[![CI](https://github.com/VecGrep/VecGrep/actions/workflows/ci.yml/badge.svg)](https://github.com/VecGrep/VecGrep/actions/workflows/ci.yml)
+[![codecov](https://codecov.io/gh/VecGrep/VecGrep/branch/main/graph/badge.svg)](https://codecov.io/gh/VecGrep/VecGrep)
+[![Discussions](https://img.shields.io/github/discussions/VecGrep/VecGrep)](https://github.com/VecGrep/VecGrep/discussions)
 
 Cursor-style semantic code search as an MCP plugin for Claude Code.
 
@@ -162,7 +162,7 @@ The embedding model used by VecGrep is [`all-MiniLM-L6-v2-code-search-512`](http
 
 | | |
 |---|---|
-| ❓ **Questions** | [Start a Q&A discussion](https://github.com/iamvirul/VecGrep/discussions/new?category=q-a) |
-| 💡 **Ideas** | [Share an idea](https://github.com/iamvirul/VecGrep/discussions/new?category=ideas) |
-| 🚀 **Show & Tell** | [Share how you use VecGrep](https://github.com/iamvirul/VecGrep/discussions/new?category=show-and-tell) |
-| 🐛 **Bugs** | [Open an issue](https://github.com/iamvirul/VecGrep/issues/new) |
+| ❓ **Questions** | [Start a Q&A discussion](https://github.com/VecGrep/VecGrep/discussions/new?category=q-a) |
+| 💡 **Ideas** | [Share an idea](https://github.com/VecGrep/VecGrep/discussions/new?category=ideas) |
+| 🚀 **Show & Tell** | [Share how you use VecGrep](https://github.com/VecGrep/VecGrep/discussions/new?category=show-and-tell) |
+| 🐛 **Bugs** | [Open an issue](https://github.com/VecGrep/VecGrep/issues/new) |
