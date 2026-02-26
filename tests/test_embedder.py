@@ -43,21 +43,32 @@ class TestDeterminism:
         np.testing.assert_array_equal(v1, v2)
 
 
+class TestTorchBackend:
+    def test_torch_backend_produces_correct_shape(self):
+        with patch("vecgrep.embedder.BACKEND", "torch"):
+            vecs = embed(["def foo(): pass"])
+        assert vecs.shape == (1, 384)
+        assert vecs.dtype == np.float32
+
+    def test_torch_backend_vectors_are_unit_norm(self):
+        with patch("vecgrep.embedder.BACKEND", "torch"):
+            vecs = embed(["alpha", "beta"])
+        norms = np.linalg.norm(vecs, axis=1)
+        np.testing.assert_allclose(norms, 1.0, atol=1e-5)
+
+
 class TestDetectDevice:
     def test_returns_cuda_when_available(self):
-        with patch("vecgrep.embedder.HAS_TORCH", True), \
-             patch("vecgrep.embedder.torch") as mock_torch:
-            mock_torch.cuda.is_available.return_value = True
-            mock_torch.backends.mps.is_available.return_value = False
+        with patch("torch.cuda.is_available", return_value=True), \
+             patch("torch.backends.mps.is_available", return_value=False):
             assert _detect_device() == "cuda"
 
     def test_returns_mps_when_cuda_unavailable(self):
-        with patch("vecgrep.embedder.HAS_TORCH", True), \
-             patch("vecgrep.embedder.torch") as mock_torch:
-            mock_torch.cuda.is_available.return_value = False
-            mock_torch.backends.mps.is_available.return_value = True
+        with patch("torch.cuda.is_available", return_value=False), \
+             patch("torch.backends.mps.is_available", return_value=True):
             assert _detect_device() == "mps"
 
-    def test_returns_cpu_when_torch_unavailable(self):
-        with patch("vecgrep.embedder.HAS_TORCH", False):
+    def test_returns_cpu_when_both_unavailable(self):
+        with patch("torch.cuda.is_available", return_value=False), \
+             patch("torch.backends.mps.is_available", return_value=False):
             assert _detect_device() == "cpu"

@@ -16,6 +16,7 @@ classifiers = [
 requires-python = ">=3.12,<3.13"
 dependencies = [
     "mcp[cli]>=1.0,<2.0",
+    "fastembed>=0.4.0",
     "sentence-transformers>=3.0,<4.0",
     "tree-sitter-languages>=1.10,<2.0",
     "numpy>=1.26",

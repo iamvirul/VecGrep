@@ -11,7 +11,7 @@ Instead of grepping 50 files and sending 30,000 tokens to Claude, VecGrep return
 ## How it works
 
 1. **Chunk** — Parses source files with tree-sitter to extract semantic units (functions, classes, methods)
-2. **Embed** — Encodes each chunk locally using [`all-MiniLM-L6-v2-code-search-512`](https://huggingface.co/isuruwijesiri/all-MiniLM-L6-v2-code-search-512) (384-dim, ~80MB one-time download), automatically using Metal (Apple Silicon), CUDA (NVIDIA), or CPU
+2. **Embed** — Encodes each chunk locally using [`all-MiniLM-L6-v2-code-search-512`](https://huggingface.co/isuruwijesiri/all-MiniLM-L6-v2-code-search-512) (384-dim, ~80MB one-time download) via the fastembed ONNX backend (~100ms startup) or PyTorch, automatically using Metal (Apple Silicon), CUDA (NVIDIA), or CPU
 3. **Store** — Saves embeddings + metadata in LanceDB under `~/.vecgrep/<project_hash>/`
 4. **Search** — ANN index (IVF-PQ) for fast approximate search on large codebases
 
@@ -104,6 +104,32 @@ Index status for: /path/to/myproject
   Total chunks:   1847
   Last indexed:   2026-02-22T07:20:31+00:00
   Index size:     28.4 MB
+```
+
+## Configuration
+
+VecGrep can be tuned via environment variables:
+
+| Variable | Default | Description |
+|---|---|---|
+| `VECGREP_BACKEND` | `onnx` | Embedding backend: `onnx` (fastembed, fast startup) or `torch` (sentence-transformers, any HF model) |
+| `VECGREP_MODEL` | `isuruwijesiri/all-MiniLM-L6-v2-code-search-512` | HuggingFace model ID to use for embeddings |
+
+**Backend comparison:**
+
+| Backend | Startup | PyTorch required | Custom HF models |
+|---|---|---|---|
+| `onnx` (default) | ~100ms | No | ONNX-exported models only |
+| `torch` | ~2–3s | Yes | Any HuggingFace model |
+
+**Examples:**
+
+```bash
+# Use a different model with the torch backend
+VECGREP_BACKEND=torch VECGREP_MODEL=sentence-transformers/all-MiniLM-L6-v2 vecgrep
+
+# Use a custom ONNX model
+VECGREP_MODEL=my-org/my-onnx-model vecgrep
 ```
 
 ## Supported languages
