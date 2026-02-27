@@ -212,7 +212,10 @@ def _build_merkle_tree(root: Path, gitignore: list[str]) -> dict[str, str]:
                 tree[str(entry)] = h
                 child_hashes.append(h)
 
-        dir_hash = hashlib.sha256("".join(child_hashes).encode()).hexdigest() if child_hashes else ""
+        if child_hashes:
+            dir_hash = hashlib.sha256("".join(child_hashes).encode()).hexdigest()
+        else:
+            dir_hash = ""
         if dir_hash:
             tree[str(dirpath)] = dir_hash
         return dir_hash
