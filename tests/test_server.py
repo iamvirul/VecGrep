@@ -638,6 +638,48 @@ class TestBuildMerkleTree:
             tree = _build_merkle_tree(tmp_path, [])
         assert len(tree) == 0
 
+    def test_value_error_in_relative_to(self, tmp_path):
+        """Handles ValueError from relative_to() without raising."""
+        (tmp_path / "a.py").write_text("x=1")
+
+        def bad_relative_to(self, *args, **kwargs):
+            raise ValueError("not relative")
+
+        with patch.object(Path, "relative_to", bad_relative_to):
+            # Should not raise; rel falls back to str(entry)
+            tree = _build_merkle_tree(tmp_path, [])
+        assert isinstance(tree, dict)
+
+    def test_oserror_on_file_stat_in_merkle(self, tmp_path):
+        """OSError on entry.stat() inside _build_merkle_tree hash block is skipped."""
+        f = tmp_path / "a.py"
+        f.write_text("x=1")
+        original_stat = Path.stat
+
+        # _should_skip_file calls stat() once for the size check.
+        # We want the second call (in the hash block) to raise OSError.
+        stat_calls: dict[str, int] = {}
+
+        def counting_stat(self, **kwargs):
+            key = str(self)
+            stat_calls[key] = stat_calls.get(key, 0) + 1
+            if str(self) == str(f) and stat_calls[key] >= 4:
+                raise OSError("disappeared")
+            return original_stat(self, **kwargs)
+
+        with patch.object(Path, "stat", counting_stat):
+            tree = _build_merkle_tree(tmp_path, [])
+        assert not any(str(f) == k for k in tree)
+
+    def test_gitignored_dir_skipped_in_merkle(self, tmp_path):
+        """Dirs matching gitignore patterns are skipped."""
+        ignored = tmp_path / "vendor"
+        ignored.mkdir()
+        (ignored / "lib.py").write_text("x=1")
+        (tmp_path / "main.py").write_text("x=1")
+        tree = _build_merkle_tree(tmp_path, ["vendor"])
+        assert not any("vendor" in k for k in tree)
+
     def test_nested_dirs(self, tmp_path):
         sub = tmp_path / "src"
         sub.mkdir()
@@ -719,6 +761,20 @@ class TestMerkleSync:
         f.write_text("def foo(): return 42\ndef bar(): pass\n")
         result = _merkle_sync(str(tmp_path))
         assert "Indexed" in result or "No file changes" in result
+
+    def test_no_file_changes_when_only_dir_hash_differs(self, tmp_path):
+        """Root hash differs but _find_changed_files returns empty → 'No file changes'."""
+        (tmp_path / "a.py").write_text("def foo(): pass\n")
+        _do_index(str(tmp_path), watch=False)
+
+        root_str = str(tmp_path.resolve())
+        old_tree = _load_merkle_tree(root_str)
+        # Tamper only the root dir hash so it differs, but leave file hashes intact
+        old_tree[root_str] = "tampered"
+        _save_merkle_tree(root_str, old_tree)
+
+        result = _merkle_sync(root_str)
+        assert "No file changes detected" in result
 
 
 # ---------------------------------------------------------------------------
