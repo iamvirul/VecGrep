@@ -37,6 +37,7 @@ jobs:
           assert 'index_codebase' in tools
           assert 'search_code' in tools
           assert 'get_index_status' in tools
+          assert 'stop_watching' in tools
           print('All tools registered:', tools)
           "
 

@@ -10,12 +10,20 @@ from unittest.mock import MagicMock, patch
 from vecgrep.server import (
     _OBSERVER_REGISTRY,
     LiveSyncHandler,
+    _build_merkle_tree,
     _do_index,
     _ensure_watcher,
+    _find_changed_files,
     _get_index_lock,
     _get_store,
     _is_ignored_by_gitignore,
     _load_gitignore,
+    _load_merkle_tree,
+    _load_watched_paths,
+    _merkle_sync,
+    _restore_watchers_background,
+    _save_merkle_tree,
+    _save_watched_paths,
     _should_skip_file,
     _stop_all_observers,
     _walk_files,
@@ -23,6 +31,7 @@ from vecgrep.server import (
     index_codebase,
     main,
     search_code,
+    stop_watching,
 )
 
 # ---------------------------------------------------------------------------
@@ -558,6 +567,361 @@ class TestStopAllObservers:
 
 class TestMain:
     def test_main_runs_without_error(self):
-        with patch("vecgrep.server.mcp.run") as mock_run:
+        with patch("vecgrep.server.mcp.run") as mock_run, \
+             patch("vecgrep.server.threading.Thread") as mock_thread:
+            mock_thread.return_value = MagicMock()
             main()
             mock_run.assert_called_once()
+            mock_thread.assert_called_once()
+
+    def test_main_starts_background_restore_thread(self):
+        with patch("vecgrep.server.mcp.run"), \
+             patch("vecgrep.server.threading.Thread") as mock_thread:
+            mock_t = MagicMock()
+            mock_thread.return_value = mock_t
+            main()
+            mock_thread.assert_called_once_with(
+                target=_restore_watchers_background, daemon=True
+            )
+            mock_t.start.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# Merkle Tree
+# ---------------------------------------------------------------------------
+
+
+class TestBuildMerkleTree:
+    def test_builds_tree_for_single_file(self, tmp_path):
+        (tmp_path / "a.py").write_text("def foo(): pass\n")
+        tree = _build_merkle_tree(tmp_path, [])
+        # Should contain entries for the file and the root dir
+        assert any("a.py" in k for k in tree)
+        assert str(tmp_path) in tree
+
+    def test_skips_gitignored_files(self, tmp_path):
+        (tmp_path / "a.py").write_text("x=1")
+        (tmp_path / "b.pyc").write_text("x=1")
+        tree = _build_merkle_tree(tmp_path, ["*.pyc"])
+        assert not any(".pyc" in k for k in tree)
+
+    def test_skips_always_skip_dirs(self, tmp_path):
+        nm = tmp_path / "node_modules"
+        nm.mkdir()
+        (nm / "lib.js").write_text("x=1;")
+        (tmp_path / "a.py").write_text("x=1")
+        tree = _build_merkle_tree(tmp_path, [])
+        assert not any("node_modules" in k for k in tree)
+
+    def test_skips_dot_dirs(self, tmp_path):
+        git = tmp_path / ".git"
+        git.mkdir()
+        (git / "config").write_text("x")
+        (tmp_path / "a.py").write_text("x=1")
+        tree = _build_merkle_tree(tmp_path, [])
+        assert not any(".git" in k for k in tree)
+
+    def test_empty_dir_has_no_hash(self, tmp_path):
+        tree = _build_merkle_tree(tmp_path, [])
+        assert len(tree) == 0
+
+    def test_permission_error_handled(self, tmp_path):
+        (tmp_path / "a.py").write_text("x=1")
+        original_iterdir = Path.iterdir
+
+        def bad_iterdir(self):
+            if self == tmp_path:
+                raise PermissionError("no access")
+            return original_iterdir(self)
+
+        with patch.object(Path, "iterdir", bad_iterdir):
+            tree = _build_merkle_tree(tmp_path, [])
+        assert len(tree) == 0
+
+    def test_value_error_in_relative_to(self, tmp_path):
+        """Handles ValueError from relative_to() without raising."""
+        (tmp_path / "a.py").write_text("x=1")
+
+        def bad_relative_to(self, *args, **kwargs):
+            raise ValueError("not relative")
+
+        with patch.object(Path, "relative_to", bad_relative_to):
+            # Should not raise; rel falls back to str(entry)
+            tree = _build_merkle_tree(tmp_path, [])
+        assert isinstance(tree, dict)
+
+    def test_oserror_on_file_stat_in_merkle(self, tmp_path):
+        """OSError on entry.stat() inside _build_merkle_tree hash block is skipped."""
+        f = tmp_path / "a.py"
+        f.write_text("x=1")
+        original_stat = Path.stat
+
+        # _should_skip_file calls stat() once for the size check.
+        # We want the second call (in the hash block) to raise OSError.
+        stat_calls: dict[str, int] = {}
+
+        def counting_stat(self, **kwargs):
+            key = str(self)
+            stat_calls[key] = stat_calls.get(key, 0) + 1
+            if str(self) == str(f) and stat_calls[key] >= 4:
+                raise OSError("disappeared")
+            return original_stat(self, **kwargs)
+
+        with patch.object(Path, "stat", counting_stat):
+            tree = _build_merkle_tree(tmp_path, [])
+        assert not any(str(f) == k for k in tree)
+
+    def test_gitignored_dir_skipped_in_merkle(self, tmp_path):
+        """Dirs matching gitignore patterns are skipped."""
+        ignored = tmp_path / "vendor"
+        ignored.mkdir()
+        (ignored / "lib.py").write_text("x=1")
+        (tmp_path / "main.py").write_text("x=1")
+        tree = _build_merkle_tree(tmp_path, ["vendor"])
+        assert not any("vendor" in k for k in tree)
+
+    def test_nested_dirs(self, tmp_path):
+        sub = tmp_path / "src"
+        sub.mkdir()
+        (sub / "main.py").write_text("def main(): pass\n")
+        tree = _build_merkle_tree(tmp_path, [])
+        assert str(sub) in tree
+        assert str(tmp_path) in tree
+        assert any("main.py" in k for k in tree)
+
+
+class TestSaveLoadMerkleTree:
+    def test_round_trip(self, tmp_path):
+        tree = {"/some/file.py": "abc123", "/some/dir": "def456"}
+        root = str(tmp_path)
+        _save_merkle_tree(root, tree)
+        loaded = _load_merkle_tree(root)
+        assert loaded == tree
+
+    def test_load_nonexistent_returns_empty(self):
+        loaded = _load_merkle_tree("/nonexistent/path/xyz")
+        assert loaded == {}
+
+    def test_load_corrupt_json_returns_empty(self, tmp_path):
+        root = str(tmp_path)
+        _save_merkle_tree(root, {"a": "b"})
+        # Corrupt the file
+        from vecgrep.server import _project_dir
+        merkle_path = _project_dir(root) / "merkle.json"
+        merkle_path.write_text("{corrupt")
+        loaded = _load_merkle_tree(root)
+        assert loaded == {}
+
+
+class TestFindChangedFiles:
+    def test_detects_new_file(self, tmp_path):
+        f = tmp_path / "new.py"
+        f.write_text("x=1")
+        old = {}
+        new = {str(f): "abc123"}
+        changed = _find_changed_files(old, new)
+        assert f in changed
+
+    def test_detects_modified_file(self, tmp_path):
+        f = tmp_path / "mod.py"
+        f.write_text("x=1")
+        old = {str(f): "old_hash"}
+        new = {str(f): "new_hash"}
+        changed = _find_changed_files(old, new)
+        assert f in changed
+
+    def test_unchanged_file_not_included(self, tmp_path):
+        f = tmp_path / "same.py"
+        f.write_text("x=1")
+        old = {str(f): "same_hash"}
+        new = {str(f): "same_hash"}
+        changed = _find_changed_files(old, new)
+        assert f not in changed
+
+    def test_dir_entries_ignored(self, tmp_path):
+        # Directory entries shouldn't appear as changed files
+        old = {str(tmp_path): "old"}
+        new = {str(tmp_path): "new"}
+        changed = _find_changed_files(old, new)
+        assert len(changed) == 0
+
+
+class TestMerkleSync:
+    def test_no_changes_detected(self, tmp_path):
+        (tmp_path / "a.py").write_text("def foo(): pass\n")
+        _do_index(str(tmp_path), watch=False)
+        result = _merkle_sync(str(tmp_path))
+        assert "No changes detected" in result
+
+    def test_detects_file_change(self, tmp_path):
+        f = tmp_path / "a.py"
+        f.write_text("def foo(): pass\n")
+        _do_index(str(tmp_path), watch=False)
+        # Modify file
+        f.write_text("def foo(): return 42\ndef bar(): pass\n")
+        result = _merkle_sync(str(tmp_path))
+        assert "Indexed" in result or "No file changes" in result
+
+    def test_no_file_changes_when_only_dir_hash_differs(self, tmp_path):
+        """Root hash differs but _find_changed_files returns empty → 'No file changes'."""
+        (tmp_path / "a.py").write_text("def foo(): pass\n")
+        _do_index(str(tmp_path), watch=False)
+
+        root_str = str(tmp_path.resolve())
+        old_tree = _load_merkle_tree(root_str)
+        # Tamper only the root dir hash so it differs, but leave file hashes intact
+        old_tree[root_str] = "tampered"
+        _save_merkle_tree(root_str, old_tree)
+
+        result = _merkle_sync(root_str)
+        assert "No file changes detected" in result
+
+
+# ---------------------------------------------------------------------------
+# Watch State Persistence
+# ---------------------------------------------------------------------------
+
+
+class TestWatchStatePersistence:
+    def test_save_and_load_watched_paths(self, tmp_path, monkeypatch):
+        state_file = tmp_path / "watched.json"
+        monkeypatch.setattr("vecgrep.server._WATCH_STATE_FILE", state_file)
+        _OBSERVER_REGISTRY["__test_path_1__"] = MagicMock()
+        _OBSERVER_REGISTRY["__test_path_2__"] = MagicMock()
+        try:
+            _save_watched_paths()
+            paths = _load_watched_paths()
+            assert "__test_path_1__" in paths
+            assert "__test_path_2__" in paths
+        finally:
+            _OBSERVER_REGISTRY.pop("__test_path_1__", None)
+            _OBSERVER_REGISTRY.pop("__test_path_2__", None)
+
+    def test_load_nonexistent_returns_empty(self, tmp_path, monkeypatch):
+        state_file = tmp_path / "nonexistent" / "watched.json"
+        monkeypatch.setattr("vecgrep.server._WATCH_STATE_FILE", state_file)
+        assert _load_watched_paths() == []
+
+    def test_load_corrupt_json_returns_empty(self, tmp_path, monkeypatch):
+        state_file = tmp_path / "watched.json"
+        state_file.write_text("{corrupt")
+        monkeypatch.setattr("vecgrep.server._WATCH_STATE_FILE", state_file)
+        assert _load_watched_paths() == []
+
+    def test_ensure_watcher_saves_paths(self, tmp_path):
+        root = tmp_path / "watch_save_test"
+        root.mkdir()
+        root_str = str(root.resolve())
+        _OBSERVER_REGISTRY.pop(root_str, None)
+
+        with patch("vecgrep.server._save_watched_paths") as mock_save:
+            _ensure_watcher(root, [])
+            mock_save.assert_called_once()
+
+        obs = _OBSERVER_REGISTRY.pop(root_str, None)
+        if obs:
+            obs.stop()
+            obs.join(timeout=2)
+
+
+# ---------------------------------------------------------------------------
+# stop_watching tool
+# ---------------------------------------------------------------------------
+
+
+class TestStopWatching:
+    def test_stops_existing_observer(self, tmp_path):
+        root_str = str(tmp_path.resolve())
+        mock_obs = MagicMock()
+        _OBSERVER_REGISTRY[root_str] = mock_obs
+
+        with patch("vecgrep.server._save_watched_paths"):
+            result = stop_watching(str(tmp_path))
+
+        mock_obs.stop.assert_called_once()
+        assert root_str in result
+        assert root_str not in _OBSERVER_REGISTRY
+
+    def test_stop_nonexistent_path(self, tmp_path):
+        with patch("vecgrep.server._save_watched_paths"):
+            result = stop_watching(str(tmp_path / "nonexistent"))
+        assert "Stopped watching" in result
+
+
+# ---------------------------------------------------------------------------
+# Background startup restore
+# ---------------------------------------------------------------------------
+
+
+class TestRestoreWatchersBackground:
+    def test_restores_existing_paths(self, tmp_path, monkeypatch):
+        root = tmp_path / "project"
+        root.mkdir()
+        (root / "a.py").write_text("def foo(): pass\n")
+
+        state_file = tmp_path / "watched.json"
+        monkeypatch.setattr("vecgrep.server._WATCH_STATE_FILE", state_file)
+
+        import json
+        state_file.write_text(json.dumps([str(root)]))
+
+        with patch("vecgrep.server._merkle_sync") as mock_sync:
+            _restore_watchers_background()
+            mock_sync.assert_called_once_with(str(root))
+
+    def test_prunes_stale_paths(self, tmp_path, monkeypatch):
+        state_file = tmp_path / "watched.json"
+        monkeypatch.setattr("vecgrep.server._WATCH_STATE_FILE", state_file)
+
+        import json
+        state_file.write_text(json.dumps(["/nonexistent/stale/path"]))
+
+        with patch("vecgrep.server._merkle_sync"):
+            _restore_watchers_background()
+
+        updated = json.loads(state_file.read_text())
+        assert "/nonexistent/stale/path" not in updated
+
+    def test_handles_sync_exception(self, tmp_path, monkeypatch):
+        root = tmp_path / "project"
+        root.mkdir()
+
+        state_file = tmp_path / "watched.json"
+        monkeypatch.setattr("vecgrep.server._WATCH_STATE_FILE", state_file)
+
+        import json
+        state_file.write_text(json.dumps([str(root)]))
+
+        with patch("vecgrep.server._merkle_sync", side_effect=RuntimeError("boom")):
+            _restore_watchers_background()  # should not raise
+
+
+# ---------------------------------------------------------------------------
+# Merkle tree saved after _do_index
+# ---------------------------------------------------------------------------
+
+
+class TestDoIndexSavesMerkle:
+    def test_merkle_tree_saved_after_index(self, tmp_path):
+        (tmp_path / "a.py").write_text("def foo(): pass\n")
+        _do_index(str(tmp_path))
+        tree = _load_merkle_tree(str(tmp_path.resolve()))
+        assert len(tree) > 0
+        assert any("a.py" in k for k in tree)
+
+
+class TestProcessFileUpdatesMerkle:
+    def test_merkle_updated_after_live_sync(self, tmp_path):
+        f = tmp_path / "a.py"
+        f.write_text("def foo(): pass\n")
+        _do_index(str(tmp_path))
+
+        # Modify file
+        f.write_text("def foo(): return 42\ndef bar(): pass\n")
+
+        h = LiveSyncHandler(str(tmp_path.resolve()), [])
+        h._debounce_delay = 0
+        h._process_file(str(f))
+
+        tree = _load_merkle_tree(str(tmp_path.resolve()))
+        assert str(f) in tree or str(f.resolve()) in tree

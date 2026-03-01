@@ -206,9 +206,9 @@ class VectorStore:
             return False
         num_partitions = min(256, max(1, n // 64))
         self._table.create_index(
-            "vector",
-            index_type="IVF_PQ",
             metric="cosine",
+            index_type="IVF_PQ",
+            vector_column_name="vector",
             num_partitions=num_partitions,
             num_sub_vectors=16,
             replace=True,

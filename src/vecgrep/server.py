@@ -6,6 +6,7 @@ from __future__ import annotations
 import atexit
 import fnmatch
 import hashlib
+import json
 import logging
 import os
 import threading
@@ -31,6 +32,7 @@ def _stop_all_observers() -> None:
             observer.join(timeout=2)
         except Exception:
             pass
+    _OBSERVER_REGISTRY.clear()
 
 # ---------------------------------------------------------------------------
 # MCP server setup
@@ -43,6 +45,7 @@ mcp = FastMCP("vecgrep")
 # ---------------------------------------------------------------------------
 
 VECGREP_HOME = Path.home() / ".vecgrep"
+_WATCH_STATE_FILE = VECGREP_HOME / "watched.json"
 
 ALWAYS_SKIP_DIRS = {
     ".git",
@@ -111,6 +114,7 @@ EMBED_BATCH = 64
 
 _LOCK_REGISTRY: dict[str, threading.Lock] = {}
 _LOCK_REGISTRY_LOCK = threading.Lock()
+_MERKLE_LOCK = threading.Lock()
 
 
 def _get_index_lock(path: str) -> threading.Lock:
@@ -156,6 +160,135 @@ def _load_gitignore(root: Path) -> list[str]:
             if line and not line.startswith("#"):
                 patterns.append(line)
     return patterns
+
+
+# ---------------------------------------------------------------------------
+# Merkle Tree Change Detection
+# ---------------------------------------------------------------------------
+
+
+def _project_dir(root: str) -> Path:
+    d = VECGREP_HOME / _project_hash(root)
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _build_merkle_tree(root: Path, gitignore: list[str]) -> dict[str, str]:
+    tree: dict[str, str] = {}
+
+    def _hash_dir(dirpath: Path) -> str:
+        child_hashes: list[str] = []
+        try:
+            entries = sorted(dirpath.iterdir())
+        except PermissionError:
+            return ""
+
+        for entry in entries:
+            try:
+                rel = str(entry.relative_to(root))
+            except ValueError:
+                rel = str(entry)
+            try:
+                is_dir = entry.is_dir()
+                is_file = entry.is_file()
+            except OSError:
+                continue
+            if is_dir:
+                if entry.name in ALWAYS_SKIP_DIRS or entry.name.startswith("."):
+                    continue
+                if _is_ignored_by_gitignore(rel, gitignore):
+                    continue
+                dh = _hash_dir(entry)
+                if dh:
+                    child_hashes.append(dh)
+            elif is_file:
+                if _is_ignored_by_gitignore(rel, gitignore) or _should_skip_file(entry):
+                    continue
+                try:
+                    st = entry.stat()
+                    h = hashlib.sha256(f"{st.st_mtime}:{st.st_size}".encode()).hexdigest()
+                except OSError:
+                    continue
+                tree[str(entry)] = h
+                child_hashes.append(h)
+
+        if child_hashes:
+            dir_hash = hashlib.sha256("".join(child_hashes).encode()).hexdigest()
+        else:
+            dir_hash = ""
+        if dir_hash:
+            tree[str(dirpath)] = dir_hash
+        return dir_hash
+
+    _hash_dir(root)
+    return tree
+
+
+def _save_merkle_tree(root: str, tree: dict[str, str]) -> None:
+    path = _project_dir(root) / "merkle.json"
+    path.write_text(json.dumps(tree))
+
+
+def _load_merkle_tree(root: str) -> dict[str, str]:
+    path = _project_dir(root) / "merkle.json"
+    if path.exists():
+        try:
+            return json.loads(path.read_text())
+        except (json.JSONDecodeError, OSError):
+            return {}
+    return {}
+
+
+def _find_changed_files(old_tree: dict[str, str], new_tree: dict[str, str]) -> list[Path]:
+    changed: list[Path] = []
+    for path_str, new_hash in new_tree.items():
+        p = Path(path_str)
+        if p.is_file() and old_tree.get(path_str) != new_hash:
+            changed.append(p)
+    return changed
+
+
+def _merkle_sync(path_str: str) -> str:
+    root = Path(path_str).resolve()
+    gitignore = _load_gitignore(root)
+
+    old_tree = _load_merkle_tree(str(root))
+    new_tree = _build_merkle_tree(root, gitignore)
+
+    root_str = str(root)
+    if old_tree.get(root_str) == new_tree.get(root_str):
+        _save_merkle_tree(root_str, new_tree)
+        _ensure_watcher(root, gitignore)
+        return "No changes detected"
+
+    changed = _find_changed_files(old_tree, new_tree)
+    if not changed:
+        _save_merkle_tree(root_str, new_tree)
+        _ensure_watcher(root, gitignore)
+        return "No file changes detected"
+
+    result = _do_index(path_str, force=False, watch=True)
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Watch State Persistence
+# ---------------------------------------------------------------------------
+
+
+def _save_watched_paths() -> None:
+    paths = list(_OBSERVER_REGISTRY.keys())
+    _WATCH_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    _WATCH_STATE_FILE.write_text(json.dumps(paths))
+
+
+def _load_watched_paths() -> list[str]:
+    if _WATCH_STATE_FILE.exists():
+        try:
+            return json.loads(_WATCH_STATE_FILE.read_text())
+        except (json.JSONDecodeError, OSError):
+            return []
+    return []
 
 
 # ---------------------------------------------------------------------------
@@ -243,6 +376,15 @@ class LiveSyncHandler(FileSystemEventHandler):
 
                 store.replace_file_chunks(fp_str, rows, vecs)
                 store.touch_last_indexed()
+
+                # Update Merkle tree incrementally (global lock prevents concurrent
+                # load-modify-save races across different file events)
+                with _MERKLE_LOCK:
+                    tree = _load_merkle_tree(self.root_path)
+                    tree[fp_str] = hashlib.sha256(
+                        f"{current_mtime}:{current_size}".encode()
+                    ).hexdigest()
+                    _save_merkle_tree(self.root_path, tree)
         except Exception:
             _log.exception("LiveSync error processing %s", file_path_str)
         finally:
@@ -301,6 +443,7 @@ def _ensure_watcher(root: Path, gitignore: list[str]) -> None:
             observer.schedule(handler, root_str, recursive=True)
             observer.start()
             _OBSERVER_REGISTRY[root_str] = observer
+    _save_watched_paths()
 
 
 def _is_ignored_by_gitignore(rel_path: str, patterns: list[str]) -> bool:
@@ -451,6 +594,10 @@ def _do_index(path: str, force: bool = False, watch: bool = False) -> str:
             if files_changed > 0:
                 store.build_index()
 
+        # Save Merkle tree for future change detection
+        merkle = _build_merkle_tree(root, gitignore)
+        _save_merkle_tree(str(root), merkle)
+
         # Only start the background watcher when explicitly requested
         if watch:
             _ensure_watcher(root, gitignore)
@@ -593,12 +740,45 @@ def get_index_status(path: str) -> str:
         return f"Error: {e}"
 
 
+@mcp.tool()
+def stop_watching(path: str) -> str:
+    """Stop watching a codebase for file changes."""
+    root = Path(path).resolve()
+    root_str = str(root)
+    with _LOCK_REGISTRY_LOCK:
+        observer = _OBSERVER_REGISTRY.pop(root_str, None)
+    if observer:
+        observer.stop()
+        observer.join(timeout=2)
+    _save_watched_paths()
+    return f"Stopped watching: {root_str}"
+
+
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
 
+def _restore_watchers_background() -> None:
+    """Restore watchers and run incremental sync in background."""
+    watched = _load_watched_paths()
+    pruned = []
+    for path_str in watched:
+        root = Path(path_str)
+        if root.exists():
+            pruned.append(path_str)
+            try:
+                _merkle_sync(path_str)
+            except Exception:
+                _log.exception("Failed to sync %s on startup", path_str)
+    if len(pruned) != len(watched):
+        _WATCH_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        _WATCH_STATE_FILE.write_text(json.dumps(pruned))
+
+
 def main() -> None:
+    t = threading.Thread(target=_restore_watchers_background, daemon=True)
+    t.start()
     mcp.run()
 
 
