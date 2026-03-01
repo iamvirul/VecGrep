@@ -114,6 +114,7 @@ EMBED_BATCH = 64
 
 _LOCK_REGISTRY: dict[str, threading.Lock] = {}
 _LOCK_REGISTRY_LOCK = threading.Lock()
+_MERKLE_LOCK = threading.Lock()
 
 
 def _get_index_lock(path: str) -> threading.Lock:
@@ -167,8 +168,7 @@ def _load_gitignore(root: Path) -> list[str]:
 
 
 def _project_dir(root: str) -> Path:
-    h = hashlib.sha256(root.encode()).hexdigest()[:16]
-    d = VECGREP_HOME / h
+    d = VECGREP_HOME / _project_hash(root)
     d.mkdir(parents=True, exist_ok=True)
     return d
 
@@ -258,11 +258,13 @@ def _merkle_sync(path_str: str) -> str:
     root_str = str(root)
     if old_tree.get(root_str) == new_tree.get(root_str):
         _save_merkle_tree(root_str, new_tree)
+        _ensure_watcher(root, gitignore)
         return "No changes detected"
 
     changed = _find_changed_files(old_tree, new_tree)
     if not changed:
         _save_merkle_tree(root_str, new_tree)
+        _ensure_watcher(root, gitignore)
         return "No file changes detected"
 
     result = _do_index(path_str, force=False, watch=True)
@@ -375,12 +377,14 @@ class LiveSyncHandler(FileSystemEventHandler):
                 store.replace_file_chunks(fp_str, rows, vecs)
                 store.touch_last_indexed()
 
-                # Update Merkle tree incrementally
-                tree = _load_merkle_tree(self.root_path)
-                tree[fp_str] = hashlib.sha256(
-                    f"{current_mtime}:{current_size}".encode()
-                ).hexdigest()
-                _save_merkle_tree(self.root_path, tree)
+                # Update Merkle tree incrementally (global lock prevents concurrent
+                # load-modify-save races across different file events)
+                with _MERKLE_LOCK:
+                    tree = _load_merkle_tree(self.root_path)
+                    tree[fp_str] = hashlib.sha256(
+                        f"{current_mtime}:{current_size}".encode()
+                    ).hexdigest()
+                    _save_merkle_tree(self.root_path, tree)
         except Exception:
             _log.exception("LiveSync error processing %s", file_path_str)
         finally:
