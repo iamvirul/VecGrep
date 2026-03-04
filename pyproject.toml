@@ -40,6 +40,10 @@ dev = [
     "ruff>=0.4.0",
     "pyright>=1.1.360",
 ]
+openai = ["openai>=1.0"]
+voyage = ["voyageai>=0.3.0"]
+gemini = ["google-genai>=1.0"]
+cloud = ["openai>=1.0", "voyageai>=0.3.0", "google-genai>=1.0"]
 
 [build-system]
 requires = ["hatchling"]

@@ -13,19 +13,25 @@ import pyarrow as pa
 # Minimum chunks needed before building an ANN index (IVF-PQ requires enough data)
 _INDEX_MIN_ROWS = 256
 
-# Define the LanceDB Schema
-schema = pa.schema([
-    pa.field("id", pa.string()),
-    pa.field("file_path", pa.string()),
-    pa.field("start_line", pa.int32()),
-    pa.field("end_line", pa.int32()),
-    pa.field("content", pa.string()),
-    pa.field("file_hash", pa.string()),
-    pa.field("chunk_hash", pa.string()),
-    pa.field("mtime", pa.float64()),
-    pa.field("size", pa.int64()),
-    pa.field("vector", pa.list_(pa.float32(), 384)),
-])
+
+def _chunks_schema(dims: int) -> pa.Schema:
+    """Return the chunks table schema for a given embedding dimensionality."""
+    return pa.schema([
+        pa.field("id", pa.string()),
+        pa.field("file_path", pa.string()),
+        pa.field("start_line", pa.int32()),
+        pa.field("end_line", pa.int32()),
+        pa.field("content", pa.string()),
+        pa.field("file_hash", pa.string()),
+        pa.field("chunk_hash", pa.string()),
+        pa.field("mtime", pa.float64()),
+        pa.field("size", pa.int64()),
+        pa.field("vector", pa.list_(pa.float32(), dims)),
+    ])
+
+
+# Backward-compatible module-level schema (384 dims, local provider default)
+schema = _chunks_schema(384)
 
 _file_stats_schema = pa.schema([
     pa.field("file_path", pa.string()),
@@ -41,7 +47,7 @@ _meta_schema = pa.schema([
 
 
 class VectorStore:
-    def __init__(self, index_dir: Path) -> None:
+    def __init__(self, index_dir: Path, dims: int = 384) -> None:
         self.index_dir = index_dir
         self.index_dir.mkdir(parents=True, exist_ok=True)
         self.db_path = str(self.index_dir / "lancedb")
@@ -49,9 +55,23 @@ class VectorStore:
 
         existing = set(self._db.list_tables().tables)
 
+        # Open/create meta table first so we can read stored dims
+        self.meta_table_name = "meta"
+        if self.meta_table_name not in existing:
+            self._meta_table = self._db.create_table(self.meta_table_name, schema=_meta_schema)
+        else:
+            self._meta_table = self._db.open_table(self.meta_table_name)
+
+        # Use stored dims if present, otherwise use the provided param
+        stored_dims = self._get_meta("dims")
+        self._dims = int(stored_dims) if stored_dims is not None else dims
+
         self.table_name = "chunks"
         if self.table_name not in existing:
-            self._table = self._db.create_table(self.table_name, schema=schema)
+            self._table = self._db.create_table(
+                self.table_name, schema=_chunks_schema(self._dims)
+            )
+            self._set_meta("dims", str(self._dims))
         else:
             self._table = self._db.open_table(self.table_name)
 
@@ -64,12 +84,6 @@ class VectorStore:
         else:
             self._file_stats_table = self._db.open_table(self._file_stats_table_name)
 
-        self.meta_table_name = "meta"
-        if self.meta_table_name not in existing:
-            self._meta_table = self._db.create_table(self.meta_table_name, schema=_meta_schema)
-        else:
-            self._meta_table = self._db.open_table(self.meta_table_name)
-
     # ------------------------------------------------------------------
     # Context manager
     # ------------------------------------------------------------------
@@ -79,6 +93,62 @@ class VectorStore:
 
     def __exit__(self, *args: object) -> None:
         pass  # LanceDB doesn't require explicit closing
+
+    # ------------------------------------------------------------------
+    # Meta helpers
+    # ------------------------------------------------------------------
+
+    def _get_meta(self, key: str) -> str | None:
+        """Return the stored value for *key*, or None if not present."""
+        if self._meta_table.count_rows() == 0:
+            return None
+        rows = self._meta_table.search().where(f"key = '{key}'").limit(1).to_list()
+        return rows[0]["value"] if rows else None
+
+    def _set_meta(self, key: str, value: str) -> None:
+        """Upsert a single key/value pair in the meta table."""
+        self._meta_table.delete(f"key = '{key}'")
+        self._meta_table.add([{"key": key, "value": value}])
+
+    # ------------------------------------------------------------------
+    # Provider meta
+    # ------------------------------------------------------------------
+
+    def set_provider_meta(self, provider: str, model: str, dims: int) -> None:
+        """Persist the provider/model/dims used to build this index."""
+        self._set_meta("provider", provider)
+        self._set_meta("model", model)
+        self._set_meta("dims", str(dims))
+
+    def get_provider_meta(self) -> dict:
+        """Return stored provider metadata (provider, model, dims)."""
+        return {
+            "provider": self._get_meta("provider") or "local",
+            "model": self._get_meta("model") or "unknown",
+            "dims": int(self._get_meta("dims") or self._dims),
+        }
+
+    # ------------------------------------------------------------------
+    # Chunks table management
+    # ------------------------------------------------------------------
+
+    def drop_and_recreate_chunks(self, dims: int) -> None:
+        """Drop and recreate the chunks table with new dimensionality.
+
+        Used when force re-indexing with a different embedding provider.
+        """
+        self._db.drop_table(self.table_name)
+        self._table = self._db.create_table(
+            self.table_name, schema=_chunks_schema(dims)
+        )
+        self._dims = dims
+        self._set_meta("dims", str(dims))
+
+        # Also clear file_stats so everything is re-indexed
+        self._db.drop_table(self._file_stats_table_name)
+        self._file_stats_table = self._db.create_table(
+            self._file_stats_table_name, schema=_file_stats_schema
+        )
 
     # ------------------------------------------------------------------
     # File stats helpers (O(files), not O(chunks))
@@ -129,7 +199,7 @@ class VectorStore:
 
         rows: list of dicts with keys: file_path, start_line, end_line,
               content, file_hash, chunk_hash, mtime, size
-        vectors: float32 array of shape (len(rows), 384)
+        vectors: float32 array of shape (len(rows), dims)
         """
         if len(rows) != len(vectors):
             raise ValueError("rows/vectors length mismatch")
@@ -257,12 +327,8 @@ class VectorStore:
         total_chunks = self._table.count_rows()
         total_files = self._file_stats_table.count_rows()
 
-        meta_rows = self._meta_table.search().limit(None).to_list()
-        last_indexed = "never"
-        for r in meta_rows:
-            if r["key"] == "last_indexed":
-                last_indexed = r["value"]
-                break
+        last_indexed = self._get_meta("last_indexed") or "never"
+        provider_meta = self.get_provider_meta()
 
         db_path = Path(self.db_path)
         db_size = (
@@ -276,9 +342,11 @@ class VectorStore:
             "total_chunks": total_chunks,
             "last_indexed": last_indexed,
             "index_size_bytes": db_size,
+            "provider": provider_meta["provider"],
+            "model": provider_meta["model"],
+            "dims": provider_meta["dims"],
         }
 
     def touch_last_indexed(self) -> None:
         ts = datetime.now(UTC).isoformat()
-        self._meta_table.delete("key = 'last_indexed'")
-        self._meta_table.add([{"key": "last_indexed", "value": ts}])
+        self._set_meta("last_indexed", ts)
