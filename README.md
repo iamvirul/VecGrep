@@ -21,7 +21,8 @@ Incremental re-indexing via mtime/size checks skips unchanged files.
 
 ## Architecture
 
-![VecGrep architecture diagram](.github/res/diagram.jpeg)
+![Architecture](https://github.com/user-attachments/assets/519e76d5-c483-44a4-a1d4-6f3b99ed70fa)
+
 
 ## Installation
 
